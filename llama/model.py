@@ -1,14 +1,25 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the terms described in the LICENSE file in
+# top-level folder for each specific model found within the models/ directory at
+# the top-level of this source tree.
+
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 # This software may be used and distributed in accordance with the terms of the Llama 3 Community License Agreement.
 
 import math
-from dataclasses import dataclass
 from typing import Optional, Tuple
 
+import fairscale.nn.model_parallel.initialize as fs_init
 import torch
 import torch.nn.functional as F
 from torch import nn
+from dataclasses import dataclass
 
+# **NOTE**: This code is not runnable without installing `torch` and `fairscale`
+# dependencies. These dependencies are not part of the default dependencies
+# (requirements.txt) of the `llama-models` package.
 
 @dataclass
 class ModelArgs:
@@ -21,9 +32,15 @@ class ModelArgs:
     ffn_dim_multiplier: Optional[float] = None
     norm_eps: float = 1e-5
     rope_theta: float = 500000
+    use_scaled_rope: bool = False
 
     max_batch_size: int = 32
     max_seq_len: int = 2048
+
+    # vision model params
+    vision_chunk_size: int = -1  # image resolution for image models
+    vision_max_num_chunks: int = 4
+    vision_num_cross_attention_layers: int = -1
 
 
 class RMSNorm(torch.nn.Module):
@@ -40,9 +57,31 @@ class RMSNorm(torch.nn.Module):
         return output * self.weight
 
 
-def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
+def apply_scaling(freqs: torch.Tensor) -> torch.Tensor:
+    # Values obtained from grid search
+    scale_factor = 8
+    low_freq_factor = 1
+    high_freq_factor = 4
+    old_context_len = 8192  # original llama3 length
+
+    low_freq_wavelen = old_context_len / low_freq_factor
+    high_freq_wavelen = old_context_len / high_freq_factor
+
+    wavelen = 2 * torch.pi / freqs
+    new_freqs = torch.where(wavelen > low_freq_wavelen, freqs / scale_factor, freqs)
+    smooth = (old_context_len / wavelen - low_freq_factor) / (high_freq_factor - low_freq_factor)
+    return torch.where(
+        (wavelen >= high_freq_wavelen) & (wavelen <= low_freq_wavelen),
+        (1 - smooth) * new_freqs / scale_factor + smooth * new_freqs,
+        new_freqs,
+    )
+
+
+def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0, use_scaled: bool = False):
     freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
     t = torch.arange(end, device=freqs.device, dtype=torch.float32)
+    if use_scaled:
+        freqs = apply_scaling(freqs)
     freqs = torch.outer(t, freqs)
     freqs_cis = torch.polar(torch.ones_like(freqs), freqs)  # complex64
     return freqs_cis
@@ -85,8 +124,9 @@ class Attention(nn.Module):
     def __init__(self, args: ModelArgs):
         super().__init__()
         self.n_kv_heads = args.n_heads if args.n_kv_heads is None else args.n_kv_heads
-        self.n_local_heads = args.n_heads
-        self.n_local_kv_heads = self.n_kv_heads
+        model_parallel_size = 1
+        self.n_local_heads = args.n_heads // model_parallel_size
+        self.n_local_kv_heads = self.n_kv_heads // model_parallel_size
         self.n_rep = self.n_local_heads // self.n_local_kv_heads
         self.head_dim = args.dim // args.n_heads
 
@@ -118,7 +158,7 @@ class Attention(nn.Module):
                 self.n_local_kv_heads,
                 self.head_dim,
             )
-        ).cuda()
+        )
         self.cache_v = torch.zeros(
             (
                 args.max_batch_size,
@@ -126,7 +166,7 @@ class Attention(nn.Module):
                 self.n_local_kv_heads,
                 self.head_dim,
             )
-        ).cuda()
+        )
 
     def forward(
         self,
@@ -154,18 +194,12 @@ class Attention(nn.Module):
         values = self.cache_v[:bsz, : start_pos + seqlen]
 
         # repeat k/v heads if n_kv_heads < n_heads
-        keys = repeat_kv(
-            keys, self.n_rep
-        )  # (bs, cache_len + seqlen, n_local_heads, head_dim)
-        values = repeat_kv(
-            values, self.n_rep
-        )  # (bs, cache_len + seqlen, n_local_heads, head_dim)
+        keys = repeat_kv(keys, self.n_rep)  # (bs, cache_len + seqlen, n_local_heads, head_dim)
+        values = repeat_kv(values, self.n_rep)  # (bs, cache_len + seqlen, n_local_heads, head_dim)
 
         xq = xq.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
         keys = keys.transpose(1, 2)  # (bs, n_local_heads, cache_len + seqlen, head_dim)
-        values = values.transpose(
-            1, 2
-        )  # (bs, n_local_heads, cache_len + seqlen, head_dim)
+        values = values.transpose(1, 2)  # (bs, n_local_heads, cache_len + seqlen, head_dim)
         scores = torch.matmul(xq, keys.transpose(2, 3)) / math.sqrt(self.head_dim)
         if mask is not None:
             scores = scores + mask  # (bs, n_local_heads, seqlen, cache_len + seqlen)
@@ -190,15 +224,9 @@ class FeedForward(nn.Module):
             hidden_dim = int(ffn_dim_multiplier * hidden_dim)
         hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
 
-        self.w1 = nn.Linear(
-            dim, hidden_dim, bias=False
-        )
-        self.w2 = nn.Linear(
-            hidden_dim, dim, bias=False
-        )
-        self.w3 = nn.Linear(
-            dim, hidden_dim, bias=False
-        )
+        self.w1 = nn.Linear(dim, hidden_dim, bias=False)
+        self.w2 = nn.Linear(hidden_dim, dim, bias=False)
+        self.w3 = nn.Linear(dim, hidden_dim, bias=False)
 
     def forward(self, x):
         return self.w2(F.silu(self.w1(x)) * self.w3(x))
@@ -240,23 +268,20 @@ class Transformer(nn.Module):
         self.vocab_size = params.vocab_size
         self.n_layers = params.n_layers
 
-        self.tok_embeddings = nn.Embedding(
-            params.vocab_size, params.dim
-        )
+        self.tok_embeddings = nn.Embedding(params.vocab_size, params.dim)
 
         self.layers = torch.nn.ModuleList()
         for layer_id in range(params.n_layers):
             self.layers.append(TransformerBlock(layer_id, params))
 
         self.norm = RMSNorm(params.dim, eps=params.norm_eps)
-        self.output = nn.Linear(
-            params.dim, params.vocab_size, bias=False
-        )
+        self.output = nn.Linear(params.dim, params.vocab_size, bias=False)
 
         self.freqs_cis = precompute_freqs_cis(
             params.dim // params.n_heads,
             params.max_seq_len * 2,
             params.rope_theta,
+            params.use_scaled_rope,
         )
 
     @torch.inference_mode()
@@ -272,13 +297,17 @@ class Transformer(nn.Module):
 
             mask = torch.triu(mask, diagonal=1)
 
+            # https://github.com/pytorch/pytorch/issues/100005
+            # torch.triu is buggy when the device is mps: filled values are
+            # nan instead of 0.
+            if mask.device.type == torch.device("mps").type:
+                mask = torch.nan_to_num(mask, nan=0.0)
+
             # When performing key-value caching, we compute the attention scores
             # only for the new sequence. Thus, the matrix of scores is of size
             # (seqlen, cache_len + seqlen), and the only masked entries are (i, j) for
             # j > cache_len + i, since row i corresponds to token cache_len + i.
-            mask = torch.hstack(
-                [torch.zeros((seqlen, start_pos), device=tokens.device), mask]
-            ).type_as(h)
+            mask = torch.hstack([torch.zeros((seqlen, start_pos), device=tokens.device), mask]).type_as(h)
 
         for layer in self.layers:
             h = layer(h, start_pos, freqs_cis, mask)

@@ -23,23 +23,17 @@ def partition_model_weights(state_dict, layer_ranges):
         end_layer = layer_ranges[i + 1]
         shard = OrderedDict()
 
-        # Add embedding layer to shard 0
-        if i == 0:
-            for key, value in state_dict.items():
-                if "model.embed_tokens" in key:
-                    shard[key] = value
-
-        # Add norm and output layer to the last shard
-        if i == len(layer_ranges) - 2:
-            for key, value in state_dict.items():
-                if "model.norm" in key or "lm_head" in key:
-                    shard[key] = value
-
-        # Add layer-specific weights to the corresponding shard
         for key, value in state_dict.items():
             if "model.layers." in key:
                 layer_index = int(key.split("model.layers.")[1].split(".")[0])
                 if start_layer <= layer_index < end_layer:
+                    shard[key] = value
+
+            elif i == 0 and "model.embed_tokens" in key:
+                shard[key] = value
+
+            elif i == len(layer_ranges) - 2:
+                if "model.norm" in key or "lm_head" in key:
                     shard[key] = value
 
         shards.append(shard)

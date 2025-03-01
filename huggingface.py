@@ -12,11 +12,11 @@ model_name = "meta-llama/Meta-Llama-3.1-8B-Instruct"
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 
 # # Load the model
-model = AutoModelForCausalLM.from_pretrained(model_name)
+model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.float16)
 
 # # Save the model's state dictionary
-output_path = "llama-3.1-8b/llama-3.1-8b.pth"
-torch.save(model.state_dict(), output_path)
+output_path = "./llama-3.1-8b/"
+model.save_pretrained(output_path)
 
 print(f"Model saved to {output_path}")
 

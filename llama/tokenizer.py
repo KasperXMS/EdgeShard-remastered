@@ -1,4 +1,11 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the terms described in the LICENSE file in
+# top-level folder for each specific model found within the models/ directory at
+# the top-level of this source tree.
+
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 # This software may be used and distributed in accordance with the terms of the Llama 3 Community License Agreement.
 
 import os
@@ -12,27 +19,29 @@ from typing import (
     Iterator,
     List,
     Literal,
+    Optional,
     Sequence,
-    TypedDict,
     Union,
 )
 
 import tiktoken
-from tiktoken.load import load_tiktoken_bpe
 
+from tiktoken.load import load_tiktoken_bpe
 
 logger = getLogger(__name__)
 
 
-Role = Literal["system", "user", "assistant"]
+# The tiktoken tokenizer can handle <=400k chars without
+# pyo3_runtime.PanicException.
+TIKTOKEN_MAX_ENCODE_CHARS = 400_000
+
+# https://github.com/openai/tiktoken/issues/195
+# Here we iterate over subsequences and split if we exceed the limit
+# of max consecutive non-whitespace or whitespace characters.
+MAX_NO_WHITESPACES_CHARS = 25_000
 
 
-class Message(TypedDict):
-    role: Role
-    content: str
-
-
-Dialog = Sequence[Message]
+_INSTANCE = None
 
 
 class Tokenizer:
@@ -45,6 +54,14 @@ class Tokenizer:
     num_reserved_special_tokens = 256
 
     pat_str = r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+"  # noqa: E501
+
+    @classmethod
+    def get_instance(cls):
+        global _INSTANCE
+
+        if _INSTANCE is None:
+            _INSTANCE = Tokenizer(os.path.join(os.path.dirname(__file__), "tokenizer.model"))
+        return _INSTANCE
 
     def __init__(self, model_path: str):
         """
@@ -62,39 +79,41 @@ class Tokenizer:
             "<|end_of_text|>",
             "<|reserved_special_token_0|>",
             "<|reserved_special_token_1|>",
-            "<|reserved_special_token_2|>",
-            "<|reserved_special_token_3|>",
+            "<|finetune_right_pad_id|>",
+            "<|step_id|>",
             "<|start_header_id|>",
             "<|end_header_id|>",
-            "<|reserved_special_token_4|>",
+            "<|eom_id|>",  # end of message
             "<|eot_id|>",  # end of turn
-        ] + [
-            f"<|reserved_special_token_{i}|>"
-            for i in range(5, self.num_reserved_special_tokens - 5)
+            "<|python_tag|>",
+            "<|image|>",
         ]
-        self.special_tokens = {
-            token: num_base_tokens + i for i, token in enumerate(special_tokens)
-        }
+        reserved_tokens = [
+            f"<|reserved_special_token_{2 + i}|>" for i in range(self.num_reserved_special_tokens - len(special_tokens))
+        ]
+        special_tokens = special_tokens + reserved_tokens
+
+        self.special_tokens = {token: num_base_tokens + i for i, token in enumerate(special_tokens)}
         self.model = tiktoken.Encoding(
             name=Path(model_path).name,
             pat_str=self.pat_str,
             mergeable_ranks=mergeable_ranks,
             special_tokens=self.special_tokens,
         )
-        logger.info(f"Reloaded tiktoken model from {model_path}")
 
-        self.n_words: int = self.model.n_vocab
+        self.n_words: int = num_base_tokens + len(special_tokens)
         # BOS / EOS token IDs
         self.bos_id: int = self.special_tokens["<|begin_of_text|>"]
         self.eos_id: int = self.special_tokens["<|end_of_text|>"]
-        self.pad_id: int = -1
-        self.stop_tokens = {
-            self.special_tokens["<|end_of_text|>"],
+        self.eot_id: int = self.special_tokens["<|eot_id|>"]
+        self.eom_id: int = self.special_tokens["<|eom_id|>"]
+        self.python_tag_id = self.special_tokens["<|python_tag|>"]
+        self.pad_id: int = self.special_tokens["<|finetune_right_pad_id|>"]
+        self.stop_tokens = [
+            self.eos_id,
+            self.special_tokens["<|eom_id|>"],
             self.special_tokens["<|eot_id|>"],
-        }
-        logger.info(
-            f"#words: {self.n_words} - BOS ID: {self.bos_id} - EOS ID: {self.eos_id}"
-        )
+        ]
 
     def encode(
         self,
@@ -102,7 +121,7 @@ class Tokenizer:
         *,
         bos: bool,
         eos: bool,
-        allowed_special: Union[Literal["all"], AbstractSet[str]] = set(),
+        allowed_special: Optional[Union[Literal["all"], AbstractSet[str]]] = None,
         disallowed_special: Union[Literal["all"], Collection[str]] = (),
     ) -> List[int]:
         """
@@ -112,8 +131,8 @@ class Tokenizer:
             s (str): The input string to be encoded.
             bos (bool): Whether to prepend the beginning-of-sequence token.
             eos (bool): Whether to append the end-of-sequence token.
-            allowed_tokens ("all"|set[str]): allowed special tokens in string
-            disallowed_tokens ("all"|set[str]): special tokens that raise an error when in string
+            allowed_special ("all"|set[str]): allowed special tokens in string
+            disallowed_special ("all"|set[str]): special tokens that raise an error when in string
 
         Returns:
             list[int]: A list of token IDs.
@@ -126,16 +145,9 @@ class Tokenizer:
         - Setting `allowed_special` to "all" will treat all text corresponding
           to special tokens to be encoded as special tokens.
         """
+        if allowed_special is None:
+            allowed_special = set()
         assert type(s) is str
-
-        # The tiktoken tokenizer can handle <=400k chars without
-        # pyo3_runtime.PanicException.
-        TIKTOKEN_MAX_ENCODE_CHARS = 400_000
-
-        # https://github.com/openai/tiktoken/issues/195
-        # Here we iterate over subsequences and split if we exceed the limit
-        # of max consecutive non-whitespace or whitespace characters.
-        MAX_NO_WHITESPACES_CHARS = 25_000
 
         substrs = (
             substr
@@ -173,9 +185,7 @@ class Tokenizer:
         return self.model.decode(cast(List[int], t))
 
     @staticmethod
-    def _split_whitespaces_or_nonwhitespaces(
-        s: str, max_consecutive_slice_len: int
-    ) -> Iterator[str]:
+    def _split_whitespaces_or_nonwhitespaces(s: str, max_consecutive_slice_len: int) -> Iterator[str]:
         """
         Splits the string `s` so that each substring contains no more than `max_consecutive_slice_len`
         consecutive whitespaces or consecutive non-whitespaces.
@@ -197,33 +207,3 @@ class Tokenizer:
                     slice_start = i
                     current_slice_len = 1
         yield s[slice_start:]
-
-
-class ChatFormat:
-    def __init__(self, tokenizer: Tokenizer):
-        self.tokenizer = tokenizer
-
-    def encode_header(self, message: Message) -> List[int]:
-        tokens = []
-        tokens.append(self.tokenizer.special_tokens["<|start_header_id|>"])
-        tokens.extend(self.tokenizer.encode(message["role"], bos=False, eos=False))
-        tokens.append(self.tokenizer.special_tokens["<|end_header_id|>"])
-        tokens.extend(self.tokenizer.encode("\n\n", bos=False, eos=False))
-        return tokens
-
-    def encode_message(self, message: Message) -> List[int]:
-        tokens = self.encode_header(message)
-        tokens.extend(
-            self.tokenizer.encode(message["content"].strip(), bos=False, eos=False)
-        )
-        tokens.append(self.tokenizer.special_tokens["<|eot_id|>"])
-        return tokens
-
-    def encode_dialog_prompt(self, dialog: Dialog) -> List[int]:
-        tokens = []
-        tokens.append(self.tokenizer.special_tokens["<|begin_of_text|>"])
-        for message in dialog:
-            tokens.extend(self.encode_message(message))
-        # Add the start of an assistant message for the model to complete.
-        tokens.extend(self.encode_header({"role": "assistant", "content": ""}))
-        return tokens

@@ -33,14 +33,15 @@ def main(
     )
 
     dialogs: List[Dialog] = [
-        [{"role": "user", "content": "Which one is larger, 9.9 or 9.11?"}],
+        [
+            {"role": "user", "content": "介绍一下你自己"},
+        ],
     ]
     results = generator.chat_completion(
         dialogs,
         max_gen_len=max_gen_len,
         temperature=temperature,
         top_p=top_p,
-        logprobs=True
     )
 
     for dialog, result in zip(dialogs, results):

@@ -5,7 +5,7 @@ master:
 
 worker:
   - worker0:
-      ip: "192.168.1.129"
+      ip: "192.168.1.130"
       interface: "eth0"
 
   - worker1:

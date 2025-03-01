@@ -6,6 +6,7 @@ from torch.distributed.rpc import RRef
 from pathlib import Path
 from typing_extensions import OrderedDict, Tuple
 from llama.model import ModelArgs, TransformerBlock, RMSNorm, precompute_freqs_cis
+from fairscale.nn.model_parallel.layers import VocabParallelEmbedding, ColumnParallelLinear
 
 dict_map = {
     'self_attn': 'attention', 'mlp': 'feed_forward',
@@ -22,19 +23,17 @@ class DistributedTransformer(nn.Module):
         self.p1_rref = rpc.remote("worker0", DTShard, args=(args, (0, 16), ckpt_dir))
         self.p2_rref = rpc.remote("worker1", DTShard, args=(args, (16, 32), ckpt_dir))
 
+        print("All workers initiated")
 
     def forward(self, tokens: torch.Tensor, start_pos: int):
         with torch.no_grad():
+            
             start_time = time.time()
-            for x in iter(tokens.split(4, dim=0)):
-                x_rref = RRef(x.cpu())
-                
-                out0_rref = self.p1_rref.remote().forward(x_rref, start_pos)
-                out = self.p2_rref.rpc_async().forward(out0_rref, start_pos)
+            x_rref = RRef(tokens.to('cpu'))
+            out0 = self.p1_rref.remote().forward(x_rref, start_pos)
+            out = self.p2_rref.remote().forward(out0, start_pos)
 
-            print(f"test: {(time.time() - start_time) * 1000:.8f} ms")
-
-        return torch.cat(torch.futures.wait_all([out])).cuda()
+        return out.to_here().cuda()
 
 class DTShard(nn.Module):
     def __init__(self, params: ModelArgs, offset: Tuple[int, int], ckpt_dir: str):
@@ -43,9 +42,7 @@ class DTShard(nn.Module):
         self.vocab_size = params.vocab_size
         self.n_layers = params.n_layers
         if offset[0] == 0:
-            self.tok_embeddings = nn.Embedding(
-                params.vocab_size, params.dim
-            ).to("cuda")
+            self.tok_embeddings = nn.Embedding(params.vocab_size, params.dim).to("cuda")
 
         self.layers = torch.nn.ModuleList()
         for layer_id in range(offset[0], offset[1]):
@@ -53,14 +50,13 @@ class DTShard(nn.Module):
 
         if offset[1] == params.n_layers:
             self.norm = RMSNorm(params.dim, eps=params.norm_eps).to("cuda")
-            self.output = nn.Linear(
-                params.dim, params.vocab_size, bias=False
-            ).to("cuda")
+            self.output = nn.Linear(params.dim, params.vocab_size, bias=False).to("cuda")
 
         self.freqs_cis = precompute_freqs_cis(
             params.dim // params.n_heads,
             params.max_seq_len * 2,
             params.rope_theta,
+            params.use_scaled_rope,
         )
 
         self.checkpoints_dir = ckpt_dir
@@ -86,7 +82,7 @@ class DTShard(nn.Module):
         for k,v in checkpoint.items():
             if 'layers' in k:
                 names_list = k.split('.')[1:]
-                if self.offset[0] - 1 < int(names_list[1]) < self.offset[1]:
+                if self.offset[0] <= int(names_list[1]) < self.offset[1]:
                     names_list[1] = str(int(names_list[1]) - self.offset[0])
                 names_list = [dict_map[n] if n in dict_map else n for n in names_list]
                 name = '.'.join(names_list)
@@ -97,7 +93,19 @@ class DTShard(nn.Module):
                 name = '.'.join(names_list)
                 new_state_dict[name] = v
 
-        # print(new_state_dict.keys())
+        # from llama original .pth
+        # for k,v in checkpoint.items():
+        #     if 'layers' in k:
+        #         names_list = k.split('.')[1:]
+        #         if self.offset[0] <= int(names_list[0]) < self.offset[1]:
+        #             names_list[0] = 'layers.' + str(int(names_list[0]) - self.offset[0])
+        #         names_list = [dict_map[n] if n in dict_map else n for n in names_list]
+        #         name = '.'.join(names_list)
+        #         new_state_dict[name] = v
+        #     else:
+        #         new_state_dict[k] = v
+
+        print(new_state_dict.keys())
 
         self.load_state_dict(new_state_dict, strict=True)
         print(f"Loaded state dict in {time.time() - prev_time:.2f}s")
@@ -110,8 +118,9 @@ class DTShard(nn.Module):
         if self.offset[0] == 0:
             h = self.tok_embeddings(h)
 
-        self.freqs_cis = self.freqs_cis.to(h.device)
-        freqs_cis = self.freqs_cis[start_pos : start_pos + seqlen]
+        # 前向传播中实时计算
+        freqs_cis = self._compute_freqs_cis(start_pos + seqlen).cuda()
+        freqs_cis = freqs_cis[start_pos : start_pos + seqlen]
 
         mask = None
         if seqlen > 1:
@@ -134,3 +143,12 @@ class DTShard(nn.Module):
             h = self.norm(h)
             h = self.output(h).float()
         return h.cpu()
+    
+            # 动态计算位置编码
+    def _compute_freqs_cis(self, seq_len: int):
+        return precompute_freqs_cis(
+            self.params.dim // self.params.n_heads,
+            seq_len * 2,  # 保留余量
+            self.params.rope_theta,
+            self.params.use_scaled_rope,
+        )

@@ -1,45 +1,77 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the terms described in the LICENSE file in
+# top-level folder for each specific model found within the models/ directory at
+# the top-level of this source tree.
+
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the terms described in the LICENSE file in
+# the root directory of this source tree.
+
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 # This software may be used and distributed in accordance with the terms of the Llama 3 Community License Agreement.
 
 import json
 import os
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Tuple, TypedDict
+from typing import Generator, List, Optional
 
 import torch
 import torch.nn.functional as F
+from termcolor import cprint
+
+from llama.datatypes import RawContent, RawTextItem, RawMessage, StopReason, ToolPromptFormat
 
 from llama.model import ModelArgs, Transformer
-from llama.tokenizer import ChatFormat, Dialog, Message, Tokenizer
-
 from llama.distributed import DistributedTransformer
-from transformers import AutoTokenizer
+from llama.chat_format import ChatFormat, LLMInput
+from llama.tokenizer import Tokenizer
 
 
-class CompletionPrediction(TypedDict, total=False):
+
+@dataclass
+class CompletionPrediction:
     generation: str
-    tokens: List[str]  # not required
-    logprobs: List[float]  # not required
+    decoded_tokens: Optional[List[str]] = None
+    logprobs: Optional[List[List[float]]] = None
 
 
-class ChatPrediction(TypedDict, total=False):
-    generation: Message
-    tokens: List[str]  # not required
-    logprobs: List[float]  # not required
+@dataclass
+class ChatPrediction:
+    generation: RawMessage
+    decoded_tokens: Optional[List[str]] = None
+    logprobs: Optional[List[List[float]]] = None
+
+
+@dataclass
+class TokenResult:
+    token: int
+    text: str
+    logprobs: Optional[List[float]] = None
+
+
+@dataclass
+class StreamChatPrediction(ChatPrediction):
+    is_final: bool = False
 
 
 class Llama:
     @staticmethod
     def build(
         ckpt_dir: str,
-        tokenizer_path: str,
         max_seq_len: int,
         max_batch_size: int,
         model_parallel_size: Optional[int] = None,
+        tokenizer_path: Optional[str] = None,
         seed: int = 1,
-    ) -> "Llama":
+        device: str = "cuda",
+    ):
         """
         Build a Llama instance by initializing and loading a model checkpoint.
 
@@ -50,6 +82,7 @@ class Llama:
             max_batch_size (int): Maximum batch size for inference.
             model_parallel_size (Optional[int], optional): Number of model parallel processes.
                 If not provided, it's determined from the environment. Defaults to None.
+            device (str, optional): Device to use, e.g. cuda (default), xpu, cpu, etc.
 
         Returns:
             Llama: An instance of the Llama class with the loaded model and tokenizer.
@@ -57,29 +90,49 @@ class Llama:
         Raises:
             AssertionError: If there are no checkpoint files in the specified directory,
                 or if the model parallel size does not match the number of checkpoint files.
+            RuntimeError: If PyTorch backend for the specified device is not available.
+
 
         Note:
             This method initializes the distributed process group, sets the device to CUDA,
             and loads the pre-trained model and tokenizer.
         """
-        assert 1 <= max_seq_len <= 8192, f"max_seq_len must be between 1 and 8192, got {max_seq_len}."
-        assert os.path.isdir(ckpt_dir), f"Checkpoint directory '{ckpt_dir}' does not exist."
-        assert os.path.isfile(tokenizer_path), f"Tokenizer file '{tokenizer_path}' does not exist."
+
+        device = torch.device(device)
+        if (
+            device.type == "cuda"
+            and not torch.cuda.is_available()
+            or device.type == "xpu"
+            and not torch.xpu.is_available()
+        ):
+            raise RuntimeError(f"PyTorch backend for {device.type} device type is not available")
+
+        if not torch.distributed.is_initialized():
+            if device.type == "cuda":
+                torch.distributed.init_process_group("nccl")
+            else:
+                torch.distributed.init_process_group("gloo")
 
         local_rank = int(os.environ.get("LOCAL_RANK", 0))
-        torch.cuda.set_device(local_rank)
+        if device.type == "cuda":
+            torch.cuda.set_device(local_rank)
+        elif device.type == "xpu":
+            torch.xpu.set_device(local_rank)
 
-        # seed must be the same in all processes
         torch.manual_seed(seed)
 
         if local_rank > 0:
             sys.stdout = open(os.devnull, "w")
 
         start_time = time.time()
+
         checkpoints = sorted(Path(ckpt_dir).glob("*.pth"))
         assert len(checkpoints) > 0, f"no checkpoint files found in {ckpt_dir}"
+        assert model_parallel_size == len(checkpoints), (
+            f"Loading a checkpoint for MP={len(checkpoints)} but world size is {model_parallel_size}"
+        )
         ckpt_path = checkpoints[0]
-        checkpoint = torch.load(ckpt_path, map_location="cpu")
+        checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=True)
         with open(Path(ckpt_dir) / "params.json", "r") as f:
             params = json.loads(f.read())
 
@@ -88,29 +141,43 @@ class Llama:
             max_batch_size=max_batch_size,
             **params,
         )
-        tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.1-8B")
-        assert model_args.vocab_size == tokenizer.n_words
-        if torch.cuda.is_bf16_supported():
-            torch.set_default_tensor_type(torch.cuda.BFloat16Tensor)
-            print("Inference in bf16")
+        if tokenizer_path:
+            tokenizer = Tokenizer(model_path=tokenizer_path)
         else:
-            torch.set_default_tensor_type(torch.cuda.HalfTensor)
-            print("Inference in fp16")
-            
+            tokenizer = Tokenizer.get_instance()
+
+        assert model_args.vocab_size == tokenizer.n_words
+        torch.set_default_device(device)
+        if device.type == "cuda":
+            if torch.cuda.is_bf16_supported():
+                torch.set_default_dtype(torch.bfloat16)
+            else:
+                torch.set_default_dtype(torch.half)
+        elif device.type == "xpu":
+            if torch.xpu.is_bf16_supported():
+                torch.set_default_dtype(torch.bfloat16)
+            else:
+                torch.set_default_dtype(torch.half)
+        else:
+            torch.set_default_dtype(torch.half)
+
         model = Transformer(model_args)
-        model.load_state_dict(checkpoint, strict=False)
+        model.load_state_dict(checkpoint, strict=True)
+        model.to(device)
         print(f"Loaded in {time.time() - start_time:.2f} seconds")
 
-        return Llama(model, tokenizer)
+        return Llama(model, tokenizer, model_args)
     
     @staticmethod
     def build_distributed(
         ckpt_dir: str,
-        tokenizer_path: str,
         max_seq_len: int,
         max_batch_size: int,
+        model_parallel_size: Optional[int] = None,
+        tokenizer_path: Optional[str] = None,
         seed: int = 1,
-    ) -> "Llama":
+        device: str = "cuda",
+    ):
         """
         Build a Llama instance by initializing and loading a model checkpoint.
 
@@ -121,6 +188,7 @@ class Llama:
             max_batch_size (int): Maximum batch size for inference.
             model_parallel_size (Optional[int], optional): Number of model parallel processes.
                 If not provided, it's determined from the environment. Defaults to None.
+            device (str, optional): Device to use, e.g. cuda (default), xpu, cpu, etc.
 
         Returns:
             Llama: An instance of the Llama class with the loaded model and tokenizer.
@@ -128,29 +196,27 @@ class Llama:
         Raises:
             AssertionError: If there are no checkpoint files in the specified directory,
                 or if the model parallel size does not match the number of checkpoint files.
+            RuntimeError: If PyTorch backend for the specified device is not available.
+
 
         Note:
             This method initializes the distributed process group, sets the device to CUDA,
             and loads the pre-trained model and tokenizer.
         """
-        assert 1 <= max_seq_len <= 8192, f"max_seq_len must be between 1 and 8192, got {max_seq_len}."
-        assert os.path.isdir(ckpt_dir), f"Checkpoint directory '{ckpt_dir}' does not exist."
-        assert os.path.isfile(tokenizer_path), f"Tokenizer file '{tokenizer_path}' does not exist."
 
-        local_rank = int(os.environ.get("LOCAL_RANK", 0))
-        torch.cuda.set_device(local_rank)
+        device = torch.device(device)
+        if (
+            device.type == "cuda"
+            and not torch.cuda.is_available()
+            or device.type == "xpu"
+            and not torch.xpu.is_available()
+        ):
+            raise RuntimeError(f"PyTorch backend for {device.type} device type is not available")
 
-        # seed must be the same in all processes
         torch.manual_seed(seed)
 
-        if local_rank > 0:
-            sys.stdout = open(os.devnull, "w")
-
         start_time = time.time()
-        checkpoints = sorted(Path(ckpt_dir).glob("*.pth"))
-        assert len(checkpoints) > 0, f"no checkpoint files found in {ckpt_dir}"
-        ckpt_path = checkpoints[0]
-        checkpoint = torch.load(ckpt_path, map_location="cpu")
+
         with open(Path(ckpt_dir) / "params.json", "r") as f:
             params = json.loads(f.read())
 
@@ -159,20 +225,33 @@ class Llama:
             max_batch_size=max_batch_size,
             **params,
         )
-        tokenizer = Tokenizer(tokenizer_path)
-        assert model_args.vocab_size == tokenizer.n_words
-        if torch.cuda.is_bf16_supported():
-            torch.set_default_tensor_type(torch.cuda.BFloat16Tensor)
-            print("Inference in bf16")
+        if tokenizer_path:
+            tokenizer = Tokenizer(model_path=tokenizer_path)
         else:
-            torch.set_default_tensor_type(torch.cuda.HalfTensor)
-            print("Inference in fp16")
-            
+            tokenizer = Tokenizer.get_instance()
+
+        assert model_args.vocab_size == tokenizer.n_words
+        torch.set_default_device(device)
+        if device.type == "cuda":
+            if torch.cuda.is_bf16_supported():
+                torch.set_default_dtype(torch.bfloat16)
+            else:
+                torch.set_default_dtype(torch.half)
+        elif device.type == "xpu":
+            if torch.xpu.is_bf16_supported():
+                torch.set_default_dtype(torch.bfloat16)
+            else:
+                torch.set_default_dtype(torch.half)
+        else:
+            torch.set_default_dtype(torch.half)
+
         model = DistributedTransformer(model_args, ckpt_dir)
+        print(f"Loaded in {time.time() - start_time:.2f} seconds")
 
-        return Llama(model, tokenizer)
+        return Llama(model, tokenizer, model_args)
 
-    def __init__(self, model: Transformer, tokenizer):
+    def __init__(self, model: Transformer, tokenizer: Tokenizer, args: ModelArgs):
+        self.args = args
         self.model = model
         self.tokenizer = tokenizer
         self.formatter = ChatFormat(tokenizer)
@@ -180,64 +259,83 @@ class Llama:
     @torch.inference_mode()
     def generate(
         self,
-        prompt_tokens: List[List[int]],
+        model_input: LLMInput,
         max_gen_len: int,
         temperature: float = 0.6,
         top_p: float = 0.9,
         logprobs: bool = False,
         echo: bool = False,
-    ) -> Tuple[List[List[int]], Optional[List[List[float]]]]:
-        """
-        Generate text sequences based on provided prompts using the language generation model.
-
-        Args:
-            prompt_tokens (List[List[int]]): List of tokenized prompts, where each prompt is represented as a list of integers.
-            max_gen_len (int): Maximum length of the generated text sequence.
-            temperature (float, optional): Temperature value for controlling randomness in sampling. Defaults to 0.6.
-            top_p (float, optional): Top-p probability threshold for nucleus sampling. Defaults to 0.9.
-            logprobs (bool, optional): Flag indicating whether to compute token log probabilities. Defaults to False.
-            echo (bool, optional): Flag indicating whether to include prompt tokens in the generated output. Defaults to False.
-
-        Returns:
-            Tuple[List[List[int]], Optional[List[List[float]]]]: A tuple containing generated token sequences and, if logprobs is True, corresponding token log probabilities.
-
-        Note:
-            This method uses the provided prompts as a basis for generating text. It employs nucleus sampling to produce text with controlled randomness.
-            If logprobs is True, token log probabilities are computed for each generated token.
-
-        """
+        print_model_input: bool = False,
+    ) -> Generator:
         params = self.model.params
-        bsz = len(prompt_tokens)
+
+        if print_model_input:
+            tokens_to_print = [self.formatter.vision_token if t == 128256 else t for t in model_input.tokens]
+            cprint(
+                "Input to model:\n" + self.tokenizer.decode(tokens_to_print) + "\n",
+                "red",
+            )
+        prompt_tokens = [model_input.tokens]
+
+        bsz = 1
         assert bsz <= params.max_batch_size, (bsz, params.max_batch_size)
 
         min_prompt_len = min(len(t) for t in prompt_tokens)
         max_prompt_len = max(len(t) for t in prompt_tokens)
-        assert max_prompt_len <= params.max_seq_len
-        total_len = min(params.max_seq_len, max_gen_len + max_prompt_len)
+
+        if max_prompt_len >= params.max_seq_len:
+            cprint(f"Out of token budget {max_prompt_len} vs {params.max_seq_len}", "red")
+            return
+
+        total_len = min(max_gen_len + max_prompt_len, params.max_seq_len)
+
+        is_vision = not isinstance(self.model, Transformer) and not isinstance(self.model, DistributedTransformer)
+        if is_vision:
+            images = model_input.vision.images if model_input.vision is not None else []
+            mask = model_input.vision.mask if model_input.vision is not None else []
+
+            # the method works for bsz > 1 so add a batch dimension
+            xattn_caches, cross_attention_masks, full_text_row_masked_out_mask = self.model.compute_vision_tokens_masks(
+                batch_images=[images],
+                batch_masks=[mask],
+                total_len=total_len,
+            )
 
         pad_id = self.tokenizer.pad_id
-        tokens = torch.full((bsz, total_len), pad_id, dtype=torch.long, device="cuda")
+        tokens = torch.full((bsz, total_len), pad_id, dtype=torch.long)
         for k, t in enumerate(prompt_tokens):
-            tokens[k, : len(t)] = torch.tensor(t, dtype=torch.long, device="cuda")
+            tokens[k, : len(t)] = torch.tensor(t, dtype=torch.long)
         if logprobs:
             token_logprobs = torch.zeros_like(tokens, dtype=torch.float)
 
         prev_pos = 0
-        eos_reached = torch.tensor([False] * bsz, device="cuda")
+        eos_reached = torch.tensor([False] * bsz)
         input_text_mask = tokens != pad_id
-        if min_prompt_len == total_len:
-            logits = self.model.forward(tokens, prev_pos)
-            token_logprobs = -F.cross_entropy(
-                input=logits.transpose(1, 2),
-                target=tokens,
-                reduction="none",
-                ignore_index=pad_id,
-            )
 
-        stop_tokens = torch.tensor(list(self.tokenizer.stop_tokens))
+        if echo:
+            for i, t in enumerate(model_input.tokens):
+                yield TokenResult(
+                    token=t,
+                    text=self.tokenizer.decode([t]),
+                    logprobs=(token_logprobs[0, i : i + 1].tolist() if logprobs else None),
+                )
 
+        stop_tokens = torch.tensor(self.tokenizer.stop_tokens)
         for cur_pos in range(min_prompt_len, total_len):
-            logits = self.model.forward(tokens[:, prev_pos:cur_pos], prev_pos)
+            if is_vision:
+                position_ids = torch.arange(prev_pos, cur_pos, dtype=torch.long)
+                text_only_inference = model_input.vision is None
+                logits = self.model.forward(
+                    position_ids,
+                    tokens,
+                    cross_attention_masks,
+                    full_text_row_masked_out_mask,
+                    xattn_caches,
+                    text_only_inference,
+                )
+            else:
+                logits = self.model.forward(tokens[:, prev_pos:cur_pos], prev_pos)
+
             if temperature > 0:
                 probs = torch.softmax(logits[:, -1] / temperature, dim=-1)
                 next_token = sample_top_p(probs, top_p)
@@ -246,160 +344,265 @@ class Llama:
 
             next_token = next_token.reshape(-1)
             # only replace token if prompt has already been generated
-            next_token = torch.where(
-                input_text_mask[:, cur_pos], tokens[:, cur_pos], next_token
-            )
+            next_token = torch.where(input_text_mask[:, cur_pos], tokens[:, cur_pos], next_token)
             tokens[:, cur_pos] = next_token
+
+            target = tokens[:, prev_pos + 1 : cur_pos + 1]
+            if is_vision:
+                # the logits space (num_classes) is designed to never contain a media_token
+                # however our input token stream does contain them. we need to nuke them here
+                # or else the CUDA kernels will crash with an illegal memory access
+                vision_tokens = [self.tokenizer.special_tokens["<|image|>"], 128256]
+                masks = [target.eq(t) for t in vision_tokens]
+                if len(masks) > 1:
+                    mask = torch.logical_or(*masks)
+                else:
+                    mask = masks[0]
+                target[mask] = 0
+
             if logprobs:
                 token_logprobs[:, prev_pos + 1 : cur_pos + 1] = -F.cross_entropy(
                     input=logits.transpose(1, 2),
-                    target=tokens[:, prev_pos + 1 : cur_pos + 1],
+                    target=target,
                     reduction="none",
                     ignore_index=pad_id,
                 )
-            eos_reached |= (~input_text_mask[:, cur_pos]) & (
-                torch.isin(next_token, stop_tokens)
+            eos_reached |= (~input_text_mask[:, cur_pos]) & (torch.isin(next_token, stop_tokens))
+            yield TokenResult(
+                token=next_token[0].item(),
+                text=self.tokenizer.decode(next_token.tolist()),
+                logprobs=(token_logprobs[:, cur_pos : cur_pos + 1][0].tolist() if logprobs else None),
             )
+
             prev_pos = cur_pos
             if all(eos_reached):
                 break
 
-        if logprobs:
-            token_logprobs = token_logprobs.tolist()
-        out_tokens, out_logprobs = [], []
-        for i, toks in enumerate(tokens.tolist()):
-            # cut to max gen len
-            start = 0 if echo else len(prompt_tokens[i])
-            toks = toks[start : len(prompt_tokens[i]) + max_gen_len]
-            probs = None
-            if logprobs:
-                probs = token_logprobs[i][start : len(prompt_tokens[i]) + max_gen_len]
-            # cut to after eos tok if any
-            for stop_token in self.tokenizer.stop_tokens:
-                try:
-                    eos_idx = toks.index(stop_token)
-                    toks = toks[:eos_idx]
-                    probs = probs[:eos_idx] if logprobs else None
-                except ValueError:
-                    pass
-
-            print(toks, end=' ')
-            out_tokens.append(toks)
-            out_logprobs.append(probs)
-        return (out_tokens, out_logprobs if logprobs else None)
-
     def text_completion(
         self,
-        prompts: List[str],
+        content: RawContent,
         temperature: float = 0.6,
         top_p: float = 0.9,
         max_gen_len: Optional[int] = None,
         logprobs: bool = False,
         echo: bool = False,
-    ) -> List[CompletionPrediction]:
-        """
-        Perform text completion for a list of prompts using the language generation model.
-
-        Args:
-            prompts (List[str]): List of text prompts for completion.
-            temperature (float, optional): Temperature value for controlling randomness in sampling. Defaults to 0.6.
-            top_p (float, optional): Top-p probability threshold for nucleus sampling. Defaults to 0.9.
-            max_gen_len (Optional[int], optional): Maximum length of the generated completion sequence.
-                If not provided, it's set to the model's maximum sequence length minus 1.
-            logprobs (bool, optional): Flag indicating whether to compute token log probabilities. Defaults to False.
-            echo (bool, optional): Flag indicating whether to include prompt tokens in the generated output. Defaults to False.
-
-        Returns:
-            List[CompletionPrediction]: List of completion predictions, each containing the generated text completion.
-
-        Note:
-            This method generates text completions for the provided prompts, employing nucleus sampling to introduce controlled randomness.
-            If logprobs is True, token log probabilities are computed for each generated token.
-
-        """
-        if max_gen_len is None:
+    ) -> CompletionPrediction:
+        if max_gen_len is None or max_gen_len == 0 or max_gen_len >= self.model.params.max_seq_len:
             max_gen_len = self.model.params.max_seq_len - 1
-        prompt_tokens = [self.tokenizer.encode(x, bos=True, eos=False) for x in prompts]
-        generation_tokens, generation_logprobs = self.generate(
-            prompt_tokens=prompt_tokens,
+
+        model_input = self.formatter.encode_content(content)
+
+        tokens = []
+        token_logprobs = []
+        decoded_tokens = []
+        for result in self.generate(
+            model_input=model_input,
             max_gen_len=max_gen_len,
             temperature=temperature,
             top_p=top_p,
             logprobs=logprobs,
             echo=echo,
-        )
+        ):
+            tokens.append(result.token)
+            if logprobs:
+                decoded_tokens.append(result.text)
+                token_logprobs.append(result.logprobs)
+
+        generation = self.tokenizer.decode(tokens)
         if logprobs:
-            return [
-                {
-                    "generation": self.tokenizer.decode(t),
-                    "tokens": [self.tokenizer.decode([x]) for x in t],
-                    "logprobs": logprobs_i,
-                }
-                for t, logprobs_i in zip(generation_tokens, generation_logprobs)
-            ]
-        return [{"generation": self.tokenizer.decode(t)} for t in generation_tokens]
+            return CompletionPrediction(
+                generation=generation,
+                logprobs=token_logprobs,
+                decoded_tokens=decoded_tokens,
+            )
+
+        return CompletionPrediction(generation=generation)
 
     def chat_completion(
         self,
-        dialogs: List[Dialog],
+        messages: List[RawMessage],
         temperature: float = 0.6,
         top_p: float = 0.9,
         max_gen_len: Optional[int] = None,
         logprobs: bool = False,
-    ) -> List[ChatPrediction]:
-        """
-        Generate assistant responses for a list of conversational dialogs using the language generation model.
-
-        Args:
-            dialogs (List[Dialog]): List of conversational dialogs, where each dialog is a list of messages.
-            temperature (float, optional): Temperature value for controlling randomness in sampling. Defaults to 0.6.
-            top_p (float, optional): Top-p probability threshold for nucleus sampling. Defaults to 0.9.
-            max_gen_len (Optional[int], optional): Maximum length of the generated response sequence.
-                If not provided, it's set to the model's maximum sequence length minus 1.
-            logprobs (bool, optional): Flag indicating whether to compute token log probabilities. Defaults to False.
-
-        Returns:
-            List[ChatPrediction]: List of chat predictions, each containing the assistant's generated response.
-
-        Note:
-            This method generates assistant responses for the provided conversational dialogs.
-            It employs nucleus sampling to introduce controlled randomness in text generation.
-            If logprobs is True, token log probabilities are computed for each generated token.
-        """
-        if max_gen_len is None:
+        tool_prompt_format: ToolPromptFormat = ToolPromptFormat.json,
+        echo: bool = False,
+    ) -> ChatPrediction:
+        if max_gen_len is None or max_gen_len == 0 or max_gen_len >= self.model.params.max_seq_len:
             max_gen_len = self.model.params.max_seq_len - 1
 
-        prompt_tokens = [
-            self.formatter.encode_dialog_prompt(dialog) for dialog in dialogs
-        ]
-        generation_tokens, generation_logprobs = self.generate(
-            prompt_tokens=prompt_tokens,
+        tokens = []
+        token_logprobs = []
+        decoded_tokens = []
+
+        stop_reason = None
+        for result in self.generate(
+            model_input=self.formatter.encode_dialog_prompt(messages, tool_prompt_format),
             max_gen_len=max_gen_len,
             temperature=temperature,
             top_p=top_p,
             logprobs=logprobs,
-        )
+            echo=echo,
+        ):
+            tokens.append(result.token)
+            if result.text == "<|eot_id|>":
+                stop_reason = StopReason.end_of_turn
+            elif result.text == "<|eom_id|>":
+                stop_reason = StopReason.end_of_message
+
+            if logprobs:
+                decoded_tokens.append(result.text)
+                token_logprobs.append(result.logprobs)
+
+        if stop_reason is None:
+            stop_reason = StopReason.out_of_tokens
+
+        message = self.formatter.decode_assistant_message(tokens, stop_reason)
+
         if logprobs:
-            return [
-                {
-                    "generation": {
-                        "role": "assistant",
-                        "content": self.tokenizer.decode(t),
-                    },
-                    "tokens": [self.tokenizer.decode([x]) for x in t],
-                    "logprobs": logprobs_i,
-                }
-                for t, logprobs_i in zip(generation_tokens, generation_logprobs)
-            ]
-        return [
-            {
-                "generation": {
-                    "role": "assistant",
-                    "content": self.tokenizer.decode(t),
-                },
-            }
-            for t in generation_tokens
-        ]
+            return ChatPrediction(
+                generation=message,
+                logprobs=token_logprobs,
+                decoded_tokens=decoded_tokens,
+            )
+
+        return ChatPrediction(generation=message)
+    
+    def chat_completion_stream(
+            self,
+            messages: List[RawMessage],
+            temperature: float = 0.6,
+            top_p: float = 0.9,
+            max_gen_len: Optional[int] = None,
+            logprobs: bool = False,
+            tool_prompt_format: ToolPromptFormat = ToolPromptFormat.json,
+            echo: bool = False,
+        ) -> Generator[StreamChatPrediction, None, None]:
+        """流式对话生成接口"""
+        
+        # 初始化参数
+        if max_gen_len is None or max_gen_len >= self.model.params.max_seq_len:
+            max_gen_len = self.model.params.max_seq_len - 1
+
+        # 初始化生成状态
+        accumulated_tokens = []
+        decoded_tokens = []
+        token_logprobs = []
+        stop_reason = None
+        final_message = None
+        has_stopped = False
+
+        # 获取输入token序列
+        model_input = self.formatter.encode_dialog_prompt(messages, tool_prompt_format)
+
+        # 流式生成循环
+        for result in self.generate(
+            model_input=model_input,
+            max_gen_len=max_gen_len,
+            temperature=temperature,
+            top_p=top_p,
+            logprobs=logprobs,
+            echo=echo,
+        ):
+            if has_stopped:
+                break
+
+            # 更新状态
+            accumulated_tokens.append(result.token)
+            
+            # 处理解码结果
+            current_text = result.text
+            is_stop_token = current_text in ["<|eot_id|>", "<|eom_id|>"]
+            
+            # 构建中间预测结果
+            partial_message = RawMessage(
+                role="assistant",
+                content=current_text,
+                stop_reason=StopReason.end_of_turn if is_stop_token else None
+            )
+
+            # 处理logprobs
+            current_logprobs = []
+            if logprobs:
+                decoded_tokens.append(current_text)
+                token_logprobs.append(result.logprobs)
+                current_logprobs = [result.logprobs]  # 当前token的logprob
+
+            # 生成中间结果
+            yield StreamChatPrediction(
+                generation=partial_message,
+                decoded_tokens=decoded_tokens.copy() if logprobs else None,
+                logprobs=current_logprobs if logprobs else None,
+                is_final=False
+            )
+
+            # 检查停止条件
+            if is_stop_token:
+                stop_reason = StopReason.end_of_turn if current_text == "<|eot_id|>" else StopReason.end_of_message
+                has_stopped = True
+
+        # 处理最终结果
+        if not has_stopped:
+            stop_reason = StopReason.out_of_tokens
+
+        # 生成最终完整结果
+        final_message = self.formatter.decode_assistant_message(accumulated_tokens, stop_reason)
+        yield StreamChatPrediction(
+            generation=final_message,
+            decoded_tokens=decoded_tokens if logprobs else None,
+            logprobs=token_logprobs if logprobs else None,
+            is_final=True
+        )
+
+    def chat_completion_raw(
+        self,
+        messages: List[RawMessage],
+        temperature: float = 0.6,
+        top_p: float = 0.9,
+        max_gen_len: Optional[int] = None,
+        tool_prompt_format: ToolPromptFormat = ToolPromptFormat.json,
+    ) -> List[int]:
+        if max_gen_len is None or max_gen_len == 0 or max_gen_len >= self.model.params.max_seq_len:
+            max_gen_len = self.model.params.max_seq_len - 1
+
+        output_tokens = []
+        model_input = self.formatter.encode_dialog_prompt(messages, tool_prompt_format)
+        input_tokens = model_input.tokens
+        for result in self.generate(
+            model_input=model_input,
+            max_gen_len=max_gen_len,
+            temperature=temperature,
+            top_p=top_p,
+            logprobs=False,
+        ):
+            output_tokens.append(result.token)
+
+        return input_tokens, output_tokens
+
+    def text_completion_raw(
+        self,
+        content: RawContent,
+        temperature: float = 0.6,
+        top_p: float = 0.9,
+        max_gen_len: Optional[int] = None,
+    ):
+        if max_gen_len is None or max_gen_len == 0 or max_gen_len >= self.model.params.max_seq_len:
+            max_gen_len = self.model.params.max_seq_len - 1
+
+        model_input = self.formatter.encode_content(content)
+        input_tokens = model_input.tokens
+
+        output_tokens = []
+        for result in self.generate(
+            model_input=model_input,
+            max_gen_len=max_gen_len,
+            temperature=temperature,
+            top_p=top_p,
+            logprobs=False,
+        ):
+            output_tokens.append(result.token)
+
+        return input_tokens, output_tokens
 
 
 def sample_top_p(probs, p):
