@@ -3,7 +3,7 @@ import torch
 from huggingface_hub import login
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
-login("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")
+login("access_token")
 
 # # Replace with the correct model name
 model_name = "meta-llama/Meta-Llama-3.1-8B-Instruct"

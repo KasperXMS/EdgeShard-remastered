@@ -7,6 +7,7 @@ from pathlib import Path
 from typing_extensions import OrderedDict, Tuple
 from llama.model import ModelArgs, TransformerBlock, RMSNorm, precompute_freqs_cis
 from fairscale.nn.model_parallel.layers import VocabParallelEmbedding, ColumnParallelLinear
+from dataclasses import dataclass
 
 dict_map = {
     'self_attn': 'attention', 'mlp': 'feed_forward',
@@ -15,6 +16,7 @@ dict_map = {
     'input_layernorm': 'attention_norm', 'post_attention_layernorm': 'ffn_norm',
     'embed_tokens': 'tok_embeddings', 'lm_head': 'output',
 }
+
 
 class DistributedTransformer(nn.Module):
     def __init__(self, args: ModelArgs, ckpt_dir: str):
@@ -31,9 +33,9 @@ class DistributedTransformer(nn.Module):
             start_time = time.time()
             x_rref = RRef(tokens.to('cpu'))
             out0 = self.p1_rref.remote().forward(x_rref, start_pos)
-            out = self.p2_rref.remote().forward(out0, start_pos)
+            out = self.p2_rref.rpc_async().forward(out0, start_pos)
 
-        return out.to_here().cuda()
+        return torch.futures.wait_all([out])[0].cuda()
 
 class DTShard(nn.Module):
     def __init__(self, params: ModelArgs, offset: Tuple[int, int], ckpt_dir: str):
@@ -112,16 +114,22 @@ class DTShard(nn.Module):
 
 
     @torch.inference_mode()
-    def forward(self, tokens: any, start_pos: int):
-        h = tokens.to_here().cuda()
-        _bsz, seqlen = h.shape[:2]
+    def forward(self, input_data: any, start_pos: int):
         if self.offset[0] == 0:
+            h = input_data.to_here().cuda()
+            _bsz, seqlen = h.shape[:2]
             h = self.tok_embeddings(h)
 
-        # 前向传播中实时计算
-        freqs_cis = self._compute_freqs_cis(start_pos + seqlen).cuda()
-        freqs_cis = freqs_cis[start_pos : start_pos + seqlen]
+            freqs_cis = self.freqs_cis[start_pos : start_pos + seqlen].to(h.device)
 
+        else:
+            input_data = input_data.to_here()
+            h = input_data['hidden_states'].cuda()
+            _bsz, seqlen = h.shape[:2]
+            start_pos = input_data['start_pos']
+            freqs_cis = input_data['freqs_cis'].cuda()
+
+        
         mask = None
         if seqlen > 1:
             mask = torch.full((seqlen, seqlen), float("-inf"), device=h.device)
@@ -142,13 +150,10 @@ class DTShard(nn.Module):
         if self.offset[1] == self.n_layers:
             h = self.norm(h)
             h = self.output(h).float()
-        return h.cpu()
+            return h.cpu()
+        
+        else:
+            h = h.cpu()
+            freqs_cis = freqs_cis.cpu()
+            return {'hidden_states': h, 'start_pos': start_pos, 'freqs_cis': freqs_cis}
     
-            # 动态计算位置编码
-    def _compute_freqs_cis(self, seq_len: int):
-        return precompute_freqs_cis(
-            self.params.dim // self.params.n_heads,
-            seq_len * 2,  # 保留余量
-            self.params.rope_theta,
-            self.params.use_scaled_rope,
-        )
