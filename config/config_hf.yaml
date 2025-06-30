@@ -1,22 +1,22 @@
 master:
-  ip: "192.168.1.130"
+  ip: "192.168.1.119"
   port: "7856"
-  interface: "eth0"
+  interface: "enp4s0"
   lm_head_weight_path: "model_shards/shard_2.pth"
 
 workers:
   - 
     name: worker0
-    ip: "192.168.1.129"
-    interface: "eth0"
+    ip: "192.168.1.119"
+    interface: "enp4s0"
     start: 0
     end: 13
     ckpt_path: "model_shards/shard_0.pth"
 
   - 
     name: worker1
-    ip: "192.168.1.103"
-    interface: "eth0"
+    ip: "192.168.1.121"
+    interface: "eno1"
     start: 13
     end: 32
     ckpt_path: "model_shards/shard_1.pth"

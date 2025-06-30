@@ -1,7 +1,7 @@
 import torch
 from collections import OrderedDict
 
-def partition_model_weights(state_dict, layer_ranges):
+def partition_model_weights_hf(state_dict, layer_ranges):
     """
     Partitions the model's state dictionary into multiple shards based on layer ranges.
 
@@ -23,17 +23,66 @@ def partition_model_weights(state_dict, layer_ranges):
         end_layer = layer_ranges[i + 1]
         shard = OrderedDict()
 
+        # Add layer-specific weights to the corresponding shard
         for key, value in state_dict.items():
             if "model.layers." in key:
                 layer_index = int(key.split("model.layers.")[1].split(".")[0])
                 if start_layer <= layer_index < end_layer:
                     shard[key] = value
 
-            elif i == 0 and "model.embed_tokens" in key:
-                shard[key] = value
+            # Add embedding layer to shard 0
+            if i == 0:
+                if "model.embed_tokens" in key:
+                    shard[key] = value
+
+            # Add norm layer to the last shard
+            if i == len(layer_ranges) - 2:
+                if "model.norm" in key:
+                    shard[key] = value
+
+        shards.append(shard)
+    
+    # fetch the lm_head layer in a solo shard
+    shard = OrderedDict()
+    shard['lm_head.weight'] = state_dict['lm_head.weight']
+    shards.append(shard)
+    return shards
+
+def partition_model_weights_pth(state_dict, layer_ranges):
+    """
+    Partitions the model's state dictionary into multiple shards based on layer ranges.
+
+    Args:
+        state_dict (OrderedDict): The model's state dictionary.
+        layer_ranges (list): List of layer indices defining the ranges for each shard.
+                            For example, [0, 8, 16, 24, 32] means:
+                            - Shard 0: Layers 0 to 7 + embedding layer
+                            - Shard 1: Layers 8 to 15
+                            - Shard 2: Layers 16 to 23
+                            - Shard 3: Layers 24 to 31 + norm and output layer
+
+    Returns:
+        list: A list of shards, where each shard is an OrderedDict containing a subset of the state dictionary.
+    """
+    shards = []
+    for i in range(len(layer_ranges) - 1):
+        start_layer = layer_ranges[i]
+        end_layer = layer_ranges[i + 1]
+        shard = OrderedDict()
+
+        # Add layer-specific weights to the corresponding shard
+        for key, value in state_dict.items():
+            if "layers" in key:
+                layer_index = int(key.split(".")[1])
+                if start_layer <= layer_index < end_layer:
+                    shard[key] = value
 
             elif i == len(layer_ranges) - 2:
-                if "model.norm" in key or "lm_head" in key:
+                if 'norm' in key or "output" in key:
+                    shard[key] = value
+
+            elif i == 0:
+                if "tok_embeddings" in key:
                     shard[key] = value
 
         shards.append(shard)
@@ -73,14 +122,14 @@ def load_shards(shard_paths):
 # Example usage
 if __name__ == "__main__":
     # Load the model's state dictionary
-    state_dict = torch.load("llama-3.1-8b/llama-3.1-8b.pth")
+    state_dict = torch.load("llama-3.1-8b/llama-3.1-8b.pth", map_location="cpu")
     print(state_dict.keys())
 
     # Define layer ranges for partitioning
-    layer_ranges = [0, 16, 32]
+    layer_ranges = [0, 13, 32]
 
     # Partition the state dictionary
-    shards = partition_model_weights(state_dict, layer_ranges)
+    shards = partition_model_weights_hf(state_dict, layer_ranges)
 
     # Save the shards
     save_shards(shards, "model_shards")

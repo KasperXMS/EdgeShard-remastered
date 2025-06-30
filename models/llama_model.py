@@ -1,14 +1,16 @@
+from dataclasses import dataclass
+from typing import Any, Dict, OrderedDict
+from transformers.models.llama.modeling_llama import *
 import torch
 import torch.nn as nn
-import time
-import torch.distributed.rpc as rpc
+import time, gc
+from pathlib import Path
 from torch.distributed.rpc import RRef
-from typing import Any, Callable, Dict, List, Optional, OrderedDict, Tuple, Union
-from transformers.configuration_utils import PretrainedConfig
-from transformers.models.llama.modeling_llama import *
 from transformers.modeling_outputs import BaseModelOutputWithPast, ModelOutput
-from dataclasses import dataclass, fields, replace
-from hf.load_config import Config
+from dataclasses import dataclass
+from core.load_config import Config
+from core.distributed import DistributedModel
+
 
 @dataclass
 class IntermediateOutput(ModelOutput):
@@ -23,80 +25,143 @@ class IntermediateOutput(ModelOutput):
     flash_attn_kwargs: Optional[Dict[str, Any]] = None
 
 
-def _move_to_device(obj: Any, device: torch.device) -> Any:
-    """Recursively move tensors in nested data structures to the specified device."""
-    if isinstance(obj, torch.Tensor):
-        return obj.to(device)
-    elif isinstance(obj, tuple):
-        return tuple(_move_to_device(x, device) for x in obj)
-    elif isinstance(obj, list):
-        return [_move_to_device(x, device) for x in obj]
-    elif isinstance(obj, dict):
-        return {k: _move_to_device(v, device) for k, v in obj.items()}
-    else:
-        return obj
+class CustomLlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
+    _tied_weights_keys = ["lm_head.weight"]
 
-def move_to_cpu(instance: IntermediateOutput) -> IntermediateOutput:
-    """Move all tensor attributes of the IntermediateOutput instance to CPU."""
-    cpu_device = torch.device('cpu')
-    new_kwargs = {}
-    for field in fields(instance):
-        value = getattr(instance, field.name)
-        new_value = _move_to_device(value, cpu_device)
-        new_kwargs[field.name] = new_value
-    return replace(instance, **new_kwargs)
+    def __init__(self, config, runtime_config):
+        super().__init__(config)
+        self.runtime_config = runtime_config
+        
+        # Initialize your custom model instead of the original LlamaModel
+        self.model = DistributedModel(config, runtime_config, CustomLlamaModel)  # Replace with your custom model
+        
+        # The following lines are copied from the original LlamaForCausalLM __init__
+        self.vocab_size = config.vocab_size
+        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False).to("cuda")
+        
+        # Initialize weights and apply final processing
+        self._initialize_weights()
 
-def move_to_cuda(instance: IntermediateOutput, device: Optional[Union[int, str, torch.device]] = None) -> IntermediateOutput:
-    """Move all tensor attributes of the IntermediateOutput instance to CUDA."""
-    if device is None:
-        target_device = torch.device('cuda')
-    elif isinstance(device, int):
-        target_device = torch.device(f'cuda:{device}')
-    elif isinstance(device, str):
-        target_device = torch.device(device)
-    elif isinstance(device, torch.device):
-        target_device = device
-    else:
-        raise ValueError(f"Invalid device type: {type(device)}. Expected int, str, or torch.device.")
+    def get_input_embeddings(self):
+        return self.model.embed_tokens
 
-    new_kwargs = {}
-    for field in fields(instance):
-        value = getattr(instance, field.name)
-        new_value = _move_to_device(value, target_device)
-        new_kwargs[field.name] = new_value
-    return replace(instance, **new_kwargs)
+    def set_input_embeddings(self, value):
+        self.model.embed_tokens = value
 
-class DistributedModel(nn.Module):
-    def __init__(self, config: PretrainedConfig, runtime_config: Config):
-        super().__init__()
-        self.node_rrefs = []
-        for worker in runtime_config.workers:
-            worker_name = worker.name
-            offset = (int(worker.start), int(worker.end))
-            ckpt_path = worker.ckpt_path
-            rref = rpc.remote(worker_name, CustomLlamaModel, args=(config, offset, ckpt_path))
-            self.node_rrefs.append(rref)
+    def get_output_embeddings(self):
+        return self.lm_head
 
-        print("All workers initiated")
+    def set_output_embeddings(self, new_embeddings):
+        self.lm_head = new_embeddings
 
-    def forward(self, **input_data):
-        with torch.no_grad():
-            
-            start_time = time.time()
-            out_rrefs = [RRef(input_data)]
-            for rref in self.node_rrefs:
-                out_new_rref = rref.remote().forward(out_rrefs[-1])
-                out_rrefs.append(out_new_rref)
+    def set_decoder(self, decoder):
+        self.model = decoder
 
-            print(f"token gen time: {(time.time() - start_time) * 1000} ms ")
+    def get_decoder(self):
+        return self.model
 
-            result = out_rrefs[-1].to_here()
-            for value in result.values():
-                if isinstance(value, torch.Tensor):
-                    value = value.cuda()
-                    
-            return result
+    def _initialize_weights(self):
+        print("Initializing output layer weights")
+        old_dict = torch.load(self.runtime_config.master.lm_head_weight_path)
+        lm_head_state_dict = OrderedDict()
+        lm_head_state_dict['weight'] = old_dict['lm_head.weight']
+        self.lm_head.load_state_dict(lm_head_state_dict)
+        del old_dict
+        print("Output layer weights initialized")
+        gc.collect()
+
+    def forward(
+        self,
+        input_ids: torch.LongTensor = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[Union[Cache, List[torch.FloatTensor]]] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        labels: Optional[torch.LongTensor] = None,
+        use_cache: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+        cache_position: Optional[torch.LongTensor] = None,
+        num_logits_to_keep: int = 0,
+        **loss_kwargs,
+    ) -> Union[Tuple, CausalLMOutputWithPast]:
+        r"""
+        Args:
+            labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
+                Labels for computing the masked language modeling loss. Indices should either be in `[0, ...,
+                config.vocab_size]` or -100 (see `input_ids` docstring). Tokens with indices set to `-100` are ignored
+                (masked), the loss is only computed for the tokens with labels in `[0, ..., config.vocab_size]`.
+
+            num_logits_to_keep (`int`, *optional*):
+                Calculate logits for the last `num_logits_to_keep` tokens. If `0`, calculate logits for all
+                `input_ids` (special case). Only last token logits are needed for generation, and calculating them only for that
+                token can save memory, which becomes pretty significant for long sequences or large vocabulary size.
+
+        Returns:
+
+        Example:
+
+        ```python
+        >>> from transformers import AutoTokenizer, LlamaForCausalLM
+
+        >>> model = LlamaForCausalLM.from_pretrained("meta-llama/Llama-2-7b-hf")
+        >>> tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-2-7b-hf")
+
+        >>> prompt = "Hey, are you conscious? Can you talk to me?"
+        >>> inputs = tokenizer(prompt, return_tensors="pt")
+
+        >>> # Generate
+        >>> generate_ids = model.generate(inputs.input_ids, max_length=30)
+        >>> tokenizer.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
+        "Hey, are you conscious? Can you talk to me?\nI'm not conscious, but I can talk to you."
+        ```"""
+        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+        output_hidden_states = (
+            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+        )
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
+        outputs = self.model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            inputs_embeds=inputs_embeds,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+            cache_position=cache_position,
+        )
+
+        hidden_states = outputs.last_hidden_state
+        if self.config.pretraining_tp > 1:
+            lm_head_slices = self.lm_head.weight.split(self.vocab_size // self.config.pretraining_tp, dim=0)
+            logits = [F.linear(hidden_states, lm_head_slices[i]) for i in range(self.config.pretraining_tp)]
+            logits = torch.cat(logits, dim=-1)
+        else:
+            # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
+            logits = self.lm_head(hidden_states[:, -num_logits_to_keep:, :])
+
+        loss = None
+        if labels is not None:
+            loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.vocab_size, **loss_kwargs)
+
+        if not return_dict:
+            output = (logits,) + outputs[1:]
+            return (loss,) + output if loss is not None else output
+
+        return CausalLMOutputWithPast(
+            loss=loss,
+            logits=logits,
+            past_key_values=outputs.past_key_values,
+            hidden_states=outputs.last_hidden_state,
+            attentions=outputs.attentions,
+        )
     
+
 class CustomLlamaModel(LlamaPreTrainedModel):
     """
     Transformer decoder consisting of *config.num_hidden_layers* layers. Each layer is a [`LlamaDecoderLayer`]
@@ -112,7 +177,9 @@ class CustomLlamaModel(LlamaPreTrainedModel):
         self.offset = offset
         if offset[0] == 0:
             self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx).to("cuda")
-            self.rotary_emb = LlamaRotaryEmbedding(config=config).to("cuda")
+            
+        self._kv_cache: Optional[Cache] = None
+        self.rotary_emb = LlamaRotaryEmbedding(config=config).to("cuda")
         
         self.layers = nn.ModuleList(
             [LlamaDecoderLayer(config, layer_idx).to("cuda") for layer_idx in range(offset[0], offset[1])]
@@ -176,15 +243,17 @@ class CustomLlamaModel(LlamaPreTrainedModel):
         use_cache = use_cache if use_cache is not None else self.config.use_cache
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
+        all_hidden_states = () if output_hidden_states else None
+        all_self_attns = () if output_attentions else None
+
         if self.offset[0] == 0:
             input_data: dict = input_data.to_here()
-            # Tensor values (move to CUDA if present)
-            input_ids = get_cuda_tensor(input_data, 'input_ids')
-            attention_mask = get_cuda_tensor(input_data, 'attention_mask')
-            position_ids = get_cuda_tensor(input_data, 'position_ids')
-            past_key_values = get_cuda_tensor(input_data, 'past_key_values')
-            inputs_embeds = get_cuda_tensor(input_data, 'inputs_embeds')
-            cache_position = get_cuda_tensor(input_data, 'cache_position')
+            input_ids = input_data['input_ids']
+            attention_mask = input_data['attention_mask']
+            position_ids = input_data['position_ids']
+            past_key_values = input_data['past_key_values']
+            inputs_embeds = input_data['inputs_embeds']
+            cache_position = input_data['cache_position']
             use_cache = input_data['use_cache']
             output_attentions = input_data['output_attentions']
             output_hidden_states = input_data['output_hidden_states']
@@ -202,8 +271,10 @@ class CustomLlamaModel(LlamaPreTrainedModel):
             if inputs_embeds is None:
                 inputs_embeds = self.embed_tokens(input_ids)
 
-            if use_cache and past_key_values is None:
-                past_key_values = DynamicCache()
+            if input_data.get('past_key_values') is None:
+                self._kv_cache = None
+
+            past_key_values = self._kv_cache or DynamicCache()
 
             if cache_position is None:
                 past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
@@ -228,17 +299,14 @@ class CustomLlamaModel(LlamaPreTrainedModel):
             all_self_attns = () if output_attentions else None
         else:
             input_data: dict = input_data.to_here()
-            # Process tensor attributes (handle renames and CUDA)
-            hidden_states = get_cuda_tensor(input_data, 'hidden_states')
-            causal_mask = get_cuda_tensor(input_data, 'attention_mask')  # Map attention_mask -> causal_mask
-            position_ids = get_cuda_tensor(input_data, 'position_ids')
-            past_key_values = get_cuda_tensor(input_data, 'past_key_value')  # Note singular form in input
-            cache_position = get_cuda_tensor(input_data, 'cache_position')
-            position_embeddings = input_data['position_embeddings']
-            pos_embed_cuda = ()
-            for elements in position_embeddings:
-                pos_embed_cuda += (elements.cuda(),)
-            position_embeddings = pos_embed_cuda
+            hidden_states = input_data['hidden_states']
+            causal_mask = input_data['attention_mask']
+            position_ids = input_data['position_ids']
+            cache_position = input_data['cache_position']
+            if self._kv_cache is None:
+                self._kv_cache = DynamicCache()
+            past_key_values = self._kv_cache
+            position_embeddings = self.rotary_emb(hidden_states, position_ids)
             output_attentions = input_data['output_attentions']
             use_cache = input_data['use_cache']
             flash_attn_kwargs = input_data['flash_attn_kwargs']
@@ -277,6 +345,9 @@ class CustomLlamaModel(LlamaPreTrainedModel):
 
             if output_attentions:
                 all_self_attns += (layer_outputs[1],)
+
+            if use_cache:
+                self._kv_cache = past_key_values
             
         if self.offset[1] == self.config.num_hidden_layers:
             hidden_states = self.norm(hidden_states)
@@ -284,60 +355,28 @@ class CustomLlamaModel(LlamaPreTrainedModel):
             # add hidden states from the last decoder layer
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
-            
-            hidden_states = hidden_states.cpu()
-            past_key_values = past_key_values.cpu() if use_cache else None
-            all_hidden_states = all_hidden_states.cpu() if output_hidden_states else None
-            all_self_attns = all_self_attns.cpu() if output_attentions else None
         
-            # output = BaseModelOutputWithPast(
-            #     last_hidden_state=hidden_states,
-            #     past_key_values=past_key_values if use_cache else None,
-            #     hidden_states=all_hidden_states,
-            #     attentions=all_self_attns,
-            # )
-            output = {
-                'last_hidden_state': hidden_states,
-                'past_key_values': past_key_values if use_cache else None,
-                'hidden_states': all_hidden_states,
-                'attentions': all_self_attns,
-            }
-            # return output if return_dict else output.to_tuple()
+            output = BaseModelOutputWithPast(
+                last_hidden_state=hidden_states,
+                past_key_values=past_key_values if use_cache else None,
+                hidden_states=all_hidden_states,
+                attentions=all_self_attns,
+            )
             return output if return_dict else tuple(output.values())
         else:
-            hidden_states = hidden_states.cpu()
-            past_key_values = past_key_values.cpu() if use_cache else None
-            causal_mask = causal_mask.cpu() if causal_mask is not None else None
-            position_ids = position_ids.cpu() if position_ids is not None else None
-            cache_position = cache_position.cpu() if cache_position is not None else None
-            pos_embed_cpu = ()
-            for elements in position_embeddings:
-                pos_embed_cpu += (elements.cpu(),)
-            position_embeddings = pos_embed_cpu
 
             # assign output as a dict
-            # output = IntermediateOutput(
-            #     hidden_states,
-            #     attention_mask=causal_mask,
-            #     position_ids=position_ids,
-            #     past_key_value=past_key_values,
-            #     output_attentions=output_attentions,
-            #     use_cache=use_cache,
-            #     cache_position=cache_position,
-            #     position_embeddings=position_embeddings,
-            #     flash_attn_kwargs=flash_attn_kwargs,
-            # )
-            output = {
-                'hidden_states': hidden_states,
-                'attention_mask': causal_mask,
-                'position_ids': position_ids,
-                'past_key_value': None,
-                'output_attentions': output_attentions,
-                'use_cache': False,
-                'cache_position': cache_position,
-                'position_embeddings': position_embeddings,
-                'flash_attn_kwargs': flash_attn_kwargs,
-            }
+            output = IntermediateOutput(
+                hidden_states,
+                attention_mask=causal_mask,
+                position_ids=position_ids,
+                past_key_value=None,
+                output_attentions=output_attentions,
+                use_cache=use_cache,
+                cache_position=cache_position,
+                position_embeddings=None,
+                flash_attn_kwargs=flash_attn_kwargs,
+            )
             
             return output
 
@@ -464,10 +503,5 @@ class CustomLlamaModel(LlamaPreTrainedModel):
                 )
 
         return causal_mask
-
-def get_cuda_tensor(data, key):
-    """Helper to move tensor to CUDA if it exists and is not None."""
-    val = data.get(key)
-    return val.cuda() if val is not None else None
     
 

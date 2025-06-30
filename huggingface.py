@@ -3,10 +3,10 @@ import torch
 from huggingface_hub import login
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
-login("access_token")
+login("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")
 
 # # Replace with the correct model name
-model_name = "meta-llama/Meta-Llama-3.1-8B-Instruct"
+model_name = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
 
 # # Load the tokenizer
 tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -16,7 +16,7 @@ model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.float
 
 # # Save the model's state dictionary
 output_path = "./llama-3.1-8b/"
-model.save_pretrained(output_path)
+torch.save(model.state_dict(), output_path + "llama-3.1-8b.pth")
 
 print(f"Model saved to {output_path}")
 

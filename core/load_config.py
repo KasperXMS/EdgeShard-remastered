@@ -21,7 +21,7 @@ class Config:
 @dataclass
 class Master:
     ip: str = ""
-    port: int = 0
+    port: str = ""
     interface: str = ""
     lm_head_weight_path: str = ""
 
