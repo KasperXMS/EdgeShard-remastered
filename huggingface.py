@@ -3,7 +3,7 @@ import torch
 from huggingface_hub import login
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
-login("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")
+login("Your Huggingface Access Token")
 
 # # Replace with the correct model name
 model_name = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
