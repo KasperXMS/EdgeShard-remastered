@@ -10,6 +10,7 @@ from transformers.modeling_outputs import BaseModelOutputWithPast, ModelOutput
 from dataclasses import dataclass
 from core.load_config import Config
 from core.distributed import DistributedModel
+from utils.monitor import MemoryMonitor
 
 
 @dataclass
@@ -31,6 +32,7 @@ class CustomLlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
     def __init__(self, config, runtime_config):
         super().__init__(config)
         self.runtime_config = runtime_config
+        self.memory_monitor = MemoryMonitor()
         
         # Initialize your custom model instead of the original LlamaModel
         self.model = DistributedModel(config, runtime_config, CustomLlamaModel)  # Replace with your custom model
@@ -116,50 +118,75 @@ class CustomLlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
         >>> tokenizer.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
         "Hey, are you conscious? Can you talk to me?\nI'm not conscious, but I can talk to you."
         ```"""
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-        # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
-        outputs = self.model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            position_ids=position_ids,
-            past_key_values=past_key_values,
-            inputs_embeds=inputs_embeds,
-            use_cache=use_cache,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
-            cache_position=cache_position,
-        )
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
 
-        hidden_states = outputs.last_hidden_state
-        if self.config.pretraining_tp > 1:
-            lm_head_slices = self.lm_head.weight.split(self.vocab_size // self.config.pretraining_tp, dim=0)
-            logits = [F.linear(hidden_states, lm_head_slices[i]) for i in range(self.config.pretraining_tp)]
-            logits = torch.cat(logits, dim=-1)
-        else:
-            # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
-            logits = self.lm_head(hidden_states[:, -num_logits_to_keep:, :])
+        token_count = input_ids.shape[-1] if input_ids is not None else 0
 
-        loss = None
-        if labels is not None:
-            loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.vocab_size, **loss_kwargs)
+        try:
+            output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+            output_hidden_states = (
+                output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+            )
+            return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-        if not return_dict:
-            output = (logits,) + outputs[1:]
-            return (loss,) + output if loss is not None else output
+            # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
+            outputs = self.model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_values=past_key_values,
+                inputs_embeds=inputs_embeds,
+                use_cache=use_cache,
+                output_attentions=output_attentions,
+                output_hidden_states=output_hidden_states,
+                return_dict=return_dict,
+                cache_position=cache_position,
+            )
 
-        return CausalLMOutputWithPast(
-            loss=loss,
-            logits=logits,
-            past_key_values=outputs.past_key_values,
-            hidden_states=outputs.last_hidden_state,
-            attentions=outputs.attentions,
-        )
+            hidden_states = outputs.last_hidden_state
+            if self.config.pretraining_tp > 1:
+                lm_head_slices = self.lm_head.weight.split(self.vocab_size // self.config.pretraining_tp, dim=0)
+                logits = [F.linear(hidden_states, lm_head_slices[i]) for i in range(self.config.pretraining_tp)]
+                logits = torch.cat(logits, dim=-1)
+            else:
+                # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
+                logits = self.lm_head(hidden_states[:, -num_logits_to_keep:, :])
+
+            loss = None
+            if labels is not None:
+                loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.vocab_size, **loss_kwargs)
+
+            if not return_dict:
+                output = (logits,) + outputs[1:]
+                return (loss,) + output if loss is not None else output
+
+            return CausalLMOutputWithPast(
+                loss=loss,
+                logits=logits,
+                past_key_values=outputs.past_key_values,
+                hidden_states=outputs.last_hidden_state,
+                attentions=outputs.attentions,
+            )
+        
+        finally:
+            if torch.cuda.is_available():
+                self.memory_monitor.record_memory(token_count)
+    
+    def reset_cache(self):
+        """Reset cache across all pipeline stages"""
+        if hasattr(self.model, 'reset_kv_cache'):
+            self.model.reset_kv_cache()
+        elif hasattr(self.model, 'node_rrefs'):
+            # Distributed model case
+            futures = []
+            for rref in self.model.node_rrefs:
+                futures.append(rref.rpc_async().reset_kv_cache())
+            torch.futures.wait_all(futures)
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
     
 
 class CustomLlamaModel(LlamaPreTrainedModel):
@@ -172,6 +199,10 @@ class CustomLlamaModel(LlamaPreTrainedModel):
 
     def __init__(self, config: LlamaConfig, offset: Tuple[int, int], ckpt_path: str):
         super().__init__(config)
+
+        self.max_cache_size = config.max_position_embeddings  # Or set appropriate limit
+        self.current_cache_size = 0
+
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
         self.offset = offset
@@ -271,11 +302,6 @@ class CustomLlamaModel(LlamaPreTrainedModel):
             if inputs_embeds is None:
                 inputs_embeds = self.embed_tokens(input_ids)
 
-            if input_data.get('past_key_values') is None:
-                self._kv_cache = None
-
-            past_key_values = self._kv_cache or DynamicCache()
-
             if cache_position is None:
                 past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
                 cache_position = torch.arange(
@@ -284,6 +310,25 @@ class CustomLlamaModel(LlamaPreTrainedModel):
 
             if position_ids is None:
                 position_ids = cache_position.unsqueeze(0)
+
+            past_len = self._kv_cache.get_seq_length() if self._kv_cache else 0
+            if (attention_mask is not None
+                and past_len > 0
+                and attention_mask.shape[-1] != past_len + input_ids.shape[1]):
+                pad = attention_mask.new_ones(attention_mask.size(0), past_len)
+                attention_mask = torch.cat([pad, attention_mask], dim=-1)
+
+            if use_cache:
+                if self._kv_cache is None:
+                    self._kv_cache = DynamicCache()
+
+                if self._kv_cache.get_seq_length() > self.max_cache_size:
+                    # Prune oldest half of cache
+                    keep_from = self._kv_cache.get_seq_length() // 2
+                    self._kv_cache = self._kv_cache.prune(keep_from)
+                    self.current_cache_size = self._kv_cache.get_seq_length()
+
+            past_key_values = self._kv_cache
 
             causal_mask = self._update_causal_mask(
                 attention_mask, inputs_embeds, cache_position, past_key_values, output_attentions
@@ -300,17 +345,37 @@ class CustomLlamaModel(LlamaPreTrainedModel):
         else:
             input_data: dict = input_data.to_here()
             hidden_states = input_data['hidden_states']
-            causal_mask = input_data['attention_mask']
+            attention_mask = input_data['attention_mask']
             position_ids = input_data['position_ids']
             cache_position = input_data['cache_position']
-            if self._kv_cache is None:
-                self._kv_cache = DynamicCache()
+            
+            past_len = self._kv_cache.get_seq_length() if self._kv_cache else 0
+            if (attention_mask is not None
+                and past_len > 0
+                and attention_mask.shape[-1] != past_len + input_ids.shape[1]):
+                pad = attention_mask.new_ones(attention_mask.size(0), past_len)
+                attention_mask = torch.cat([pad, attention_mask], dim=-1)
+
+            if use_cache:
+                if self._kv_cache is None:
+                    self._kv_cache = DynamicCache()
+
+                if self._kv_cache.get_seq_length() > self.max_cache_size:
+                    # Prune oldest half of cache
+                    keep_from = self._kv_cache.get_seq_length() // 2
+                    self._kv_cache = self._kv_cache.prune(keep_from)
+                    self.current_cache_size = self._kv_cache.get_seq_length()
+
             past_key_values = self._kv_cache
+
             position_embeddings = self.rotary_emb(hidden_states, position_ids)
             output_attentions = input_data['output_attentions']
             use_cache = input_data['use_cache']
             flash_attn_kwargs = input_data['flash_attn_kwargs']
-            
+
+            causal_mask = self._update_causal_mask(
+                attention_mask, hidden_states, cache_position, past_key_values, output_attentions
+            )
 
         for decoder_layer in self.layers:
             if output_hidden_states:
@@ -348,6 +413,10 @@ class CustomLlamaModel(LlamaPreTrainedModel):
 
             if use_cache:
                 self._kv_cache = past_key_values
+
+        # print(f"kv cache length: {self._kv_cache.get_seq_length()}")
+        # print(f"key cache length: {len(self._kv_cache.key_cache)}")
+        # print(f"kv cache element size: {self._kv_cache.key_cache[0].shape}")
             
         if self.offset[1] == self.config.num_hidden_layers:
             hidden_states = self.norm(hidden_states)
@@ -379,6 +448,24 @@ class CustomLlamaModel(LlamaPreTrainedModel):
             )
             
             return output
+        
+    def reset_kv_cache(self):
+        """More aggressive cache cleanup"""
+        if self._kv_cache is not None:
+            # Explicitly delete cache tensors
+            if hasattr(self._kv_cache, 'key_cache'):
+                for k in self._kv_cache.key_cache:
+                    if isinstance(k, torch.Tensor) and k.is_cuda:
+                        del k
+            if hasattr(self._kv_cache, 'value_cache'):
+                for v in self._kv_cache.value_cache:
+                    if isinstance(v, torch.Tensor) and v.is_cuda:
+                        del v
+        self._kv_cache = None
+        self.current_cache_size = 0
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
 
     def _update_causal_mask(

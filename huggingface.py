@@ -2,34 +2,47 @@ import gc
 import torch
 from huggingface_hub import login
 from transformers import AutoTokenizer, AutoModelForCausalLM
+import os
 
-login("Your Huggingface Access Token")
+login(token=os.getenv("HF_TOKEN"))
 
-# # Replace with the correct model name
 model_name = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
+output_dir = "./llama-3.1-8b/"
+os.makedirs(output_dir, exist_ok=True)
 
-# # Load the tokenizer
-tokenizer = AutoTokenizer.from_pretrained(model_name)
+load_config = {
+    "torch_dtype": torch.float16,
+    "device_map": "cpu",
+    "low_cpu_mem_usage": True
+}
 
-# # Load the model
-model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.float16)
+try:
+    print("Loading tokenizer...")
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    tokenizer.save_pretrained(output_dir)
+    
+    print("Loading model...")
+    model = AutoModelForCausalLM.from_pretrained(model_name, **load_config)
+    
+    print("Saving model...")
+    torch.save({
+        'state_dict': model.state_dict(),
+        'config': model.config,
+    }, os.path.join(output_dir, "llama-3.1-8b.pth"))
+    
+    if os.path.exists(os.path.join(output_dir, "llama-3.1-8b.pth")):
+        file_size = os.path.getsize(os.path.join(output_dir, "llama-3.1-8b.pth")) / (1024**3)
+        print(f"Model successfully saved to {output_dir}")
+        print(f"File size: {file_size:.2f} GB")
+    else:
+        raise RuntimeError("Model save failed")
 
-# # Save the model's state dictionary
-output_path = "./llama-3.1-8b/"
-torch.save(model.state_dict(), output_path + "llama-3.1-8b.pth")
-
-print(f"Model saved to {output_path}")
-
-# del model
-# gc.collect()
-
-# Load the state dictionary back (for verification)
-# state_dict = torch.load(output_path)
-
-# Print the keys in the state dictionary
-# print("State dictionary keys:", state_dict.keys())
-
-# tokenizer_path = "llama_3.1_8b_tokenizer"
-# tokenizer.save_pretrained(tokenizer_path)
-
-# print(f"Tokenizer saved to {tokenizer_path}")
+except Exception as e:
+    print(f"Error occurred: {str(e)}")
+    if os.path.exists(output_dir):
+        import shutil
+        shutil.rmtree(output_dir)
+finally:
+    del model
+    torch.cuda.empty_cache()
+    gc.collect()

@@ -15,6 +15,6 @@ sentencepiece==0.2.0
 termcolor==2.4.0
 tiktoken==0.7.0
 tokenizers==0.20.3
-torch==2.0.1
+torch==2.3.0
 tqdm==4.66.2
 transformers==4.46.3

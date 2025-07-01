@@ -38,6 +38,7 @@ def partition_model_weights_hf(state_dict, layer_ranges):
             # Add norm layer to the last shard
             if i == len(layer_ranges) - 2:
                 if "model.norm" in key:
+                    print(value)
                     shard[key] = value
 
         shards.append(shard)
@@ -126,7 +127,7 @@ if __name__ == "__main__":
     print(state_dict.keys())
 
     # Define layer ranges for partitioning
-    layer_ranges = [0, 13, 32]
+    layer_ranges = [0, 16, 32]
 
     # Partition the state dictionary
     shards = partition_model_weights_hf(state_dict, layer_ranges)

@@ -13,8 +13,9 @@ os.environ["MASTER_ADDR"] = config.master.ip
 os.environ["MASTER_PORT"] = config.master.port
 os.environ["GLOO_SOCKET_IFNAME"] = config.workers[args.worker_rank - 1].interface
 os.environ["TP_SOCKET_IFNAME"]   = config.workers[args.worker_rank - 1].interface
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:512"
 
-opts = rpc.TensorPipeRpcBackendOptions(rpc_timeout=120)
+opts = rpc.TensorPipeRpcBackendOptions()
 opts.set_device_map("master", {0: 0})
 
 for peer in config.workers:
