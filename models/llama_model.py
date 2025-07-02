@@ -227,25 +227,26 @@ class CustomLlamaModel(LlamaPreTrainedModel):
 
     def _initialize_weights(self):
         prev_time = time.time()
-        print(f'Loading checkpoint "{self.ckpt_path}"')
+        print(f'Loading checkpoint shard "{self.ckpt_path}"')
         checkpoint = torch.load(self.ckpt_path, map_location="cpu")
         print(f"Loaded checkpoint in {time.time() - prev_time:.6f}s")
         prev_time = time.time()
-        new_state_dict = OrderedDict()
-        for k,v in checkpoint.items():
-            if 'layers' in k:
-                names_list = k.split('.')[1:]
-                if self.offset[0] <= int(names_list[1]) < self.offset[1]:
-                    names_list[1] = str(int(names_list[1]) - self.offset[0])
-                name = '.'.join(names_list)
-                new_state_dict[name] = v
-            else:
-                names_list = k.split('.')[1:]
-                name = '.'.join(names_list)
-                new_state_dict[name] = v
-
-        self.load_state_dict(new_state_dict, strict=True)
+        state_dict = {
+            self._remap_key(k): v 
+            for k, v in checkpoint.items()
+        }
+        self.load_state_dict(state_dict, strict=True)
         print(f"Loaded state dict in {time.time() - prev_time:.2f}s")
+        del checkpoint
+
+    def _remap_key(self, key):
+        if 'layers' in key:
+            parts = key.split('.')
+            layer_idx = int(parts[1])
+            if self.offset[0] <= layer_idx < self.offset[1]:
+                parts[1] = str(layer_idx - self.offset[0])
+            return '.'.join(parts[1:])
+        return '.'.join(key.split('.')[1:])
 
     def get_input_embeddings(self):
         return self.embed_tokens
@@ -344,10 +345,10 @@ class CustomLlamaModel(LlamaPreTrainedModel):
             all_self_attns = () if output_attentions else None
         else:
             input_data: dict = input_data.to_here()
-            hidden_states = input_data['hidden_states']
-            attention_mask = input_data['attention_mask']
-            position_ids = input_data['position_ids']
-            cache_position = input_data['cache_position']
+            hidden_states = input_data.hidden_states
+            attention_mask = input_data.attention_mask
+            position_ids = input_data.position_ids
+            cache_position = input_data.cache_position
             
             past_len = self._kv_cache.get_seq_length() if self._kv_cache else 0
             if (attention_mask is not None
@@ -369,9 +370,9 @@ class CustomLlamaModel(LlamaPreTrainedModel):
             past_key_values = self._kv_cache
 
             position_embeddings = self.rotary_emb(hidden_states, position_ids)
-            output_attentions = input_data['output_attentions']
-            use_cache = input_data['use_cache']
-            flash_attn_kwargs = input_data['flash_attn_kwargs']
+            output_attentions = input_data.output_attentions
+            use_cache = input_data.use_cache
+            flash_attn_kwargs = input_data.flash_attn_kwargs
 
             causal_mask = self._update_causal_mask(
                 attention_mask, hidden_states, cache_position, past_key_values, output_attentions
