@@ -33,13 +33,14 @@ class CustomLlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
         super().__init__(config)
         self.runtime_config = runtime_config
         self.memory_monitor = MemoryMonitor()
+        self.half()
         
         # Initialize your custom model instead of the original LlamaModel
         self.model = DistributedModel(config, runtime_config, CustomLlamaModel)  # Replace with your custom model
         
         # The following lines are copied from the original LlamaForCausalLM __init__
         self.vocab_size = config.vocab_size
-        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False).to("cuda")
+        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False).to("cuda").half()
         
         # Initialize weights and apply final processing
         self._initialize_weights()
@@ -66,7 +67,7 @@ class CustomLlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
         print("Initializing output layer weights")
         old_dict = torch.load(self.runtime_config.master.lm_head_weight_path)
         lm_head_state_dict = OrderedDict()
-        lm_head_state_dict['weight'] = old_dict['lm_head.weight']
+        lm_head_state_dict['weight'] = old_dict['lm_head.weight'].half()
         self.lm_head.load_state_dict(lm_head_state_dict)
         del old_dict
         print("Output layer weights initialized")
@@ -152,7 +153,7 @@ class CustomLlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
                 logits = torch.cat(logits, dim=-1)
             else:
                 # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
-                logits = self.lm_head(hidden_states[:, -num_logits_to_keep:, :])
+                logits = self.lm_head(hidden_states[:, -num_logits_to_keep:, :].to(self.lm_head.weight.dtype))
 
             loss = None
             if labels is not None:
@@ -199,6 +200,8 @@ class CustomLlamaModel(LlamaPreTrainedModel):
 
     def __init__(self, config: LlamaConfig, offset: Tuple[int, int], ckpt_path: str):
         super().__init__(config)
+        self.half()
+        torch.set_default_tensor_type(torch.HalfTensor)
 
         self.max_cache_size = config.max_position_embeddings  # Or set appropriate limit
         self.current_cache_size = 0
@@ -232,7 +235,7 @@ class CustomLlamaModel(LlamaPreTrainedModel):
         print(f"Loaded checkpoint in {time.time() - prev_time:.6f}s")
         prev_time = time.time()
         state_dict = {
-            self._remap_key(k): v 
+            self._remap_key(k): v.half() if v.is_floating_point() else v
             for k, v in checkpoint.items()
         }
         self.load_state_dict(state_dict, strict=True)
@@ -242,9 +245,10 @@ class CustomLlamaModel(LlamaPreTrainedModel):
     def _remap_key(self, key):
         if 'layers' in key:
             parts = key.split('.')
-            layer_idx = int(parts[1])
+            layer_idx = int(parts[2])
             if self.offset[0] <= layer_idx < self.offset[1]:
-                parts[1] = str(layer_idx - self.offset[0])
+                parts[2] = str(layer_idx - self.offset[0])
+
             return '.'.join(parts[1:])
         return '.'.join(key.split('.')[1:])
 
@@ -301,7 +305,7 @@ class CustomLlamaModel(LlamaPreTrainedModel):
                 use_cache = False
 
             if inputs_embeds is None:
-                inputs_embeds = self.embed_tokens(input_ids)
+                inputs_embeds = self.embed_tokens(input_ids).half()
 
             if cache_position is None:
                 past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
@@ -321,7 +325,7 @@ class CustomLlamaModel(LlamaPreTrainedModel):
 
             if use_cache:
                 if self._kv_cache is None:
-                    self._kv_cache = DynamicCache()
+                    self._kv_cache = DynamicCache().half()
 
                 if self._kv_cache.get_seq_length() > self.max_cache_size:
                     # Prune oldest half of cache
@@ -359,7 +363,7 @@ class CustomLlamaModel(LlamaPreTrainedModel):
 
             if use_cache:
                 if self._kv_cache is None:
-                    self._kv_cache = DynamicCache()
+                    self._kv_cache = DynamicCache().half()
 
                 if self._kv_cache.get_seq_length() > self.max_cache_size:
                     # Prune oldest half of cache
@@ -434,7 +438,6 @@ class CustomLlamaModel(LlamaPreTrainedModel):
             )
             return output if return_dict else tuple(output.values())
         else:
-
             # assign output as a dict
             output = IntermediateOutput(
                 hidden_states,

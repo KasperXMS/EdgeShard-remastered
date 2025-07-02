@@ -123,7 +123,7 @@ def load_shards(shard_paths):
 # Example usage
 if __name__ == "__main__":
     # Load the model's state dictionary
-    state_dict = torch.load("llama-3.1-8b/llama-3.1-8b.pth", map_location="cpu")
+    state_dict = torch.load("llama-3.1-8b/llama-3.1-8b.pth", map_location="cpu")['state_dict']
     print(state_dict.keys())
 
     # Define layer ranges for partitioning

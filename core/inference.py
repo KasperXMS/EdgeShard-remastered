@@ -22,7 +22,7 @@ def memory_management_ctx():
             torch.cuda.ipc_collect()
 
 class ConversationManager:
-    def __init__(self, tokenizer, max_history=3, max_length=512):
+    def __init__(self, tokenizer, max_history=3, max_length=1024):
         self.tokenizer = tokenizer
         self.max_history = max_history
         self.max_length = max_length
@@ -34,7 +34,7 @@ class ConversationManager:
         content = content.strip()
         
         if not content or (role == "user" and content == self.last_user_message):
-            return
+            return False
             
         self.history.append({"role": role, "content": content})
         
@@ -44,6 +44,7 @@ class ConversationManager:
             self.last_bot_message = content
             
         self._trim_history()
+        return True
 
     def get_current_history(self):
         self._trim_history()
@@ -59,9 +60,8 @@ class ConversationManager:
                 add_generation_prompt=True,
                 tokenize=False
             )
-            token_count = len(self.tokenizer.encode(prompt))
             
-            if token_count <= self.max_length * 0.8 or len(self.history) <= 2:
+            if len(self.history) <= self.max_history * 2:
                 break
                 
             self.history.pop(0)
@@ -73,11 +73,11 @@ def inference():
     with memory_management_ctx():
         cfg = AutoConfig.from_pretrained(
             model_name,
-            max_position_embeddings=512,
-            use_cache=False
+            max_position_embeddings=1024,
+            use_cache=True
         )
         tok = AutoTokenizer.from_pretrained(model_name)
-        model = CustomLlamaForCausalLM(cfg, runtime_cfg).eval()
+        model = CustomLlamaForCausalLM(cfg, runtime_cfg).eval().half()
         pad_id = tok.pad_token_id or tok.eos_token_id
         
         # Warm up model
@@ -97,18 +97,28 @@ def inference():
                 rpc.shutdown()
                 sys.exit(0)
 
-            conv_manager.add_message("user", user_input)
+            # Add user message and check if it's valid
+            if not conv_manager.add_message("user", user_input):
+                continue
+                
             current_history = conv_manager.get_current_history()
             
             with memory_management_ctx():
-                # Create attention mask that properly handles history
+                # Clear all caches before new generation
+                if hasattr(model, 'reset_cache'):
+                    model.reset_cache()
+                elif hasattr(model.model, 'reset_kv_cache'):
+                    model.model.reset_kv_cache()
+                torch.cuda.empty_cache()
+                gc.collect()
+
+                # Create prompt with proper attention mask
                 prompt_ids = tok.apply_chat_template(
                     current_history,
                     add_generation_prompt=True,
                     return_tensors="pt"
                 ).to("cuda:0")
                 
-                # Create proper attention mask (1 for real tokens, 0 for padding)
                 attention_mask = (prompt_ids != pad_id).to("cuda:0")
                 
                 streamer = TextIteratorStreamer(
@@ -121,27 +131,17 @@ def inference():
                 gen_kwargs = {
                     "input_ids": prompt_ids,
                     "attention_mask": attention_mask,
-                    "max_new_tokens": 256,
+                    "max_new_tokens": 512,
                     "temperature": 0.7,
                     "top_p": 0.9,
-                    "repetition_penalty": 1.1,  # Lower penalty for better context retention
+                    "repetition_penalty": 1.1,
                     "do_sample": True,
                     "pad_token_id": pad_id,
                     "eos_token_id": tok.eos_token_id,
                     "streamer": streamer,
-                    "num_logits_to_keep": 1,  # Only compute last token logits
                 }
 
-                # Reset cache and memory state
-                if hasattr(model, 'reset_cache'):
-                    model.reset_cache()
-                elif hasattr(model.model, 'reset_kv_cache'):
-                    model.model.reset_kv_cache()
-                
-                # Clean memory before generation
-                torch.cuda.empty_cache()
-                gc.collect()
-
+                # Start generation in a thread
                 thread = threading.Thread(target=model.generate, kwargs=gen_kwargs)
                 thread.start()
 
@@ -151,10 +151,11 @@ def inference():
                     print(new_chunk, end="", flush=True)
                     reply_text += new_chunk
 
+                # Wait for generation to complete
                 thread.join()
                 print("\n")
                 
-                # Add to history after successful generation
+                # Only add to history after successful generation
                 conv_manager.add_message("assistant", reply_text.strip())
 
         except KeyboardInterrupt:

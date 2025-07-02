@@ -1,2 +1,5 @@
 *.pth
 *.zip
+__pycache__
+*.pyc
+*.csv
