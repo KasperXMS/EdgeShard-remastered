@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from core.load_config import Config
 from core.distributed import DistributedModel
 from utils.monitor import MemoryMonitor
+from utils.mem_check import aggregate_gpu_tensors, find_shape_grouped_tensor_referrers_in_range
 
 
 @dataclass
@@ -188,6 +189,15 @@ class CustomLlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+
+    def post_process(self):
+        """
+        Any post processing after the whole model serving.
+        """
+        futures = []
+        for rref in self.model.node_rrefs:
+            futures.append(rref.rpc_async().post_process())
+        torch.futures.wait_all(futures)
     
 
 class CustomLlamaModel(LlamaPreTrainedModel):
@@ -282,8 +292,11 @@ class CustomLlamaModel(LlamaPreTrainedModel):
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
 
+        if isinstance(input_data, torch._C._distributed_rpc.PyRRef):
+            input_data = input_data.to_here()
+
         if self.offset[0] == 0:
-            input_data: dict = input_data.to_here()
+            # input_data: dict = input_data.to_here()
             input_ids = input_data['input_ids']
             attention_mask = input_data['attention_mask']
             position_ids = input_data['position_ids']
@@ -348,7 +361,7 @@ class CustomLlamaModel(LlamaPreTrainedModel):
             all_hidden_states = () if output_hidden_states else None
             all_self_attns = () if output_attentions else None
         else:
-            input_data: dict = input_data.to_here()
+            # input_data: dict = input_data.to_here()
             hidden_states = input_data.hidden_states
             attention_mask = input_data.attention_mask
             position_ids = input_data.position_ids
@@ -418,10 +431,6 @@ class CustomLlamaModel(LlamaPreTrainedModel):
 
             if use_cache:
                 self._kv_cache = past_key_values
-
-        # print(f"kv cache length: {self._kv_cache.get_seq_length()}")
-        # print(f"key cache length: {len(self._kv_cache.key_cache)}")
-        # print(f"kv cache element size: {self._kv_cache.key_cache[0].shape}")
             
         if self.offset[1] == self.config.num_hidden_layers:
             hidden_states = self.norm(hidden_states)
@@ -452,6 +461,12 @@ class CustomLlamaModel(LlamaPreTrainedModel):
             )
             
             return output
+        
+    def post_process(self):
+        """
+        Any post processing after the whole model serving.
+        """
+        aggregate_gpu_tensors()
         
     def reset_kv_cache(self):
         """More aggressive cache cleanup"""

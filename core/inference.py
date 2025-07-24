@@ -74,7 +74,7 @@ def inference():
         cfg = AutoConfig.from_pretrained(
             model_name,
             max_position_embeddings=1024,
-            use_cache=True
+            use_cache=True,
         )
         tok = AutoTokenizer.from_pretrained(model_name)
         model = CustomLlamaForCausalLM(cfg, runtime_cfg).eval().half()
@@ -93,6 +93,7 @@ def inference():
         try:
             user_input = input("用户: ").strip()
             if user_input.lower() == "/exit":     
+                model.post_process()
                 model.memory_monitor.save_to_csv()
                 rpc.shutdown()
                 sys.exit(0)
@@ -161,6 +162,7 @@ def inference():
         except KeyboardInterrupt:
             print("\nCleaning up...")
             model.memory_monitor.save_to_csv()
+            model.post_process()
             rpc.shutdown()
             sys.exit(0)
         except torch.cuda.OutOfMemoryError:

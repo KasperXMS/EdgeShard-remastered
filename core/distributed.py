@@ -39,26 +39,22 @@ class DistributedModel(nn.Module):
                 )
                 self.current_cache_position += seq_length
             
+            
+            current_rref = RRef(current_data)
             # Pipeline through stages
             for i, rref in enumerate(self.node_rrefs):
-                # Convert to RRef only when needed
-                current_rref = RRef(current_data)
-                
                 # Process on current stage
                 if i < len(self.node_rrefs) - 1:
-                    current_data = rref.remote().forward(current_rref).to_here()
-                    del current_rref  # Explicit cleanup
+                    current_rref = rref.remote().forward(current_rref)
                 else:
                     # Last stage uses async to overlap compute/transfer
                     future = rref.rpc_async().forward(current_rref)
-                    current_data = future.wait()
-                    del future, current_rref
                 
                 # Memory cleanup
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
             
-            return current_data
+            return torch.futures.wait_all([future])[0]
 
     def reset_cache(self):
         """Reset KV cache and position tracking across all stages"""
