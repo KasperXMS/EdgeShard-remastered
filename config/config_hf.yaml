@@ -10,13 +10,13 @@ workers:
     ip: "192.168.1.119"
     interface: "enp4s0"
     start: 0
-    end: 14
+    end: 16
     ckpt_path: "model_shards/shard_0.pth"
 
   - 
     name: worker1
     ip: "192.168.1.121"
     interface: "eno1"
-    start: 14
+    start: 16
     end: 32
     ckpt_path: "model_shards/shard_1.pth"

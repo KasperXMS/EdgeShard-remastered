@@ -6,7 +6,7 @@ import os
 
 login(token=os.getenv("HF_TOKEN"))
 
-model_name = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
+model_name = "meta-llama/Llama-3.1-8B-Instruct"
 output_dir = "./llama-3.1-8b/"
 os.makedirs(output_dir, exist_ok=True)
 

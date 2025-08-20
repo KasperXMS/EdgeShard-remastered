@@ -67,17 +67,19 @@ class ConversationManager:
             self.history.pop(0)
 
 def inference():
-    model_name = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"   
+    model_name = "meta-llama/Llama-3.1-8B-Instruct"   
     runtime_cfg = load_config("config/config_hf.yaml")
+    torch.set_default_dtype(torch.bfloat16)
 
     with memory_management_ctx():
         cfg = AutoConfig.from_pretrained(
             model_name,
-            max_position_embeddings=1024,
             use_cache=True,
+            output_attentions=False,
+            _attn_implementation="flash_attention_2"
         )
         tok = AutoTokenizer.from_pretrained(model_name)
-        model = CustomLlamaForCausalLM(cfg, runtime_cfg).eval().half()
+        model = CustomLlamaForCausalLM(cfg, runtime_cfg).eval()
         pad_id = tok.pad_token_id or tok.eos_token_id
         
         # Warm up model
@@ -95,6 +97,8 @@ def inference():
             if user_input.lower() == "/exit":     
                 model.post_process()
                 model.memory_monitor.save_to_csv()
+                model.latency_monitor.report_avg_latency()
+                model.latency_monitor.save_to_csv()
                 rpc.shutdown()
                 sys.exit(0)
 
@@ -105,22 +109,12 @@ def inference():
             current_history = conv_manager.get_current_history()
             
             with memory_management_ctx():
-                # Clear all caches before new generation
-                if hasattr(model, 'reset_cache'):
-                    model.reset_cache()
-                elif hasattr(model.model, 'reset_kv_cache'):
-                    model.model.reset_kv_cache()
-                torch.cuda.empty_cache()
-                gc.collect()
-
                 # Create prompt with proper attention mask
                 prompt_ids = tok.apply_chat_template(
                     current_history,
                     add_generation_prompt=True,
                     return_tensors="pt"
                 ).to("cuda:0")
-                
-                attention_mask = (prompt_ids != pad_id).to("cuda:0")
                 
                 streamer = TextIteratorStreamer(
                     tok,
@@ -131,8 +125,8 @@ def inference():
 
                 gen_kwargs = {
                     "input_ids": prompt_ids,
-                    "attention_mask": attention_mask,
-                    "max_new_tokens": 512,
+                    # "attention_mask": attention_mask,
+                    "max_new_tokens": 1024,
                     "temperature": 0.7,
                     "top_p": 0.9,
                     "repetition_penalty": 1.1,
@@ -162,6 +156,8 @@ def inference():
         except KeyboardInterrupt:
             print("\nCleaning up...")
             model.memory_monitor.save_to_csv()
+            model.latency_monitor.report_avg_latency()
+            model.latency_monitor.save_to_csv()
             model.post_process()
             rpc.shutdown()
             sys.exit(0)

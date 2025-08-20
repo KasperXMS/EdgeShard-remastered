@@ -1,3 +1,5 @@
+import io
+from typing import Optional, Sequence, Union
 import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.ticker import FuncFormatter
@@ -95,7 +97,70 @@ def create_individual_plots(df, output_prefix):
     plt.title('Peak Memory Usage')
     plt.savefig(f"{output_prefix}_peak_memory.png", dpi=300)
 
+def visualize_latency_stacked(
+    data: Union[str, pd.DataFrame],
+    components: Optional[Sequence[str]] = None,
+    clamp_negative_to_zero: bool = True,
+    title: str = "Latency per step (stacked)",
+    save_path: Optional[str] = "./latency_stacked.png"
+):
+    """
+    Visualize latency logs as a stacked area chart.
+    
+    Parameters
+    ----------
+    data : str | DataFrame
+        - CSV filepath or CSV string (with header), or
+        - a pandas DataFrame with columns like: shard_1, shard_2, comm_1, comm_2, lm_head, total
+    components : list[str] | None
+        Which columns to stack. Default: all columns except 'total' if present.
+    clamp_negative_to_zero : bool
+        If True, negative component values (e.g., timing artifacts) are clamped to 0 for plotting.
+    title : str
+        Plot title.
+    save_path : str | None
+        Where to save the PNG. If None, do not save.
+    """
+    # Load data
+    if isinstance(data, pd.DataFrame):
+        df = data.copy()
+    else:
+        # If 'data' looks like a CSV string, read from memory; otherwise treat as filepath
+        if "\n" in data and "," in data:
+            df = pd.read_csv(io.StringIO(data))
+        else:
+            df = pd.read_csv(data)
+    
+    # Determine components to plot
+    if components is None:
+        components = [c for c in df.columns if c.lower() != "total"]
+    
+    # Convert to milliseconds for readability
+    plot_df = df.copy()
+    for c in components:
+        plot_df[c] = plot_df[c] * 1000.0  # sec -> ms
+    
+    # Clamp negatives (e.g., due to overlapping windows) to zero for stacking
+    if clamp_negative_to_zero:
+        for c in components:
+            plot_df[c] = plot_df[c].clip(lower=0.0)
+    
+    # Build stacked area
+    x = range(len(plot_df))
+    ys = [plot_df[c].values for c in components]
+    
+    plt.figure(figsize=(10, 5))
+    plt.stackplot(x, ys, labels=components)
+    plt.legend(loc="upper left")
+    plt.title(title)
+    plt.xlabel("Step")
+    plt.ylabel("Milliseconds")
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150)
+
 if __name__ == "__main__":
+
+    # Memory usage visualization
     input_csv = "memory_usage.csv" 
     output_combined = "generation_metrics.png"
     output_prefix = "generation"
@@ -104,3 +169,7 @@ if __name__ == "__main__":
     
     create_combined_plot(df, output_combined)
     create_individual_plots(df, output_prefix)
+
+    # Latency visualization
+    latency_csv = "latency_report.csv"
+    visualize_latency_stacked(latency_csv, save_path="./latency_stacked.png")

@@ -4,3 +4,4 @@ __pycache__
 *.pyc
 *.csv
 *.VSCode*
+llama-3.1-8b/*

@@ -1,20 +1,13 @@
 {
   "bos_token": {
-    "content": "<｜begin▁of▁sentence｜>",
+    "content": "<|begin_of_text|>",
     "lstrip": false,
     "normalized": false,
     "rstrip": false,
     "single_word": false
   },
   "eos_token": {
-    "content": "<｜end▁of▁sentence｜>",
-    "lstrip": false,
-    "normalized": false,
-    "rstrip": false,
-    "single_word": false
-  },
-  "pad_token": {
-    "content": "<｜end▁of▁sentence｜>",
+    "content": "<|eot_id|>",
     "lstrip": false,
     "normalized": false,
     "rstrip": false,

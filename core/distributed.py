@@ -25,45 +25,20 @@ class DistributedModel(nn.Module):
         print("All workers initiated")
 
     def forward(self, **input_data):
-        with torch.no_grad():
+        with torch.inference_mode():
             # Initialize with input data
-            current_data = input_data
-            
-            # Add cache position tracking
-            if 'cache_position' not in current_data:
-                seq_length = current_data['input_ids'].shape[1] if 'input_ids' in current_data else current_data['inputs_embeds'].shape[1]
-                current_data['cache_position'] = torch.arange(
-                    self.current_cache_position,
-                    self.current_cache_position + seq_length,
-                    device='cuda'
-                )
-                self.current_cache_position += seq_length
-            
-            
+            current_data = input_data                
             current_rref = RRef(current_data)
             # Pipeline through stages
             for i, rref in enumerate(self.node_rrefs):
                 # Process on current stage
-                if i < len(self.node_rrefs) - 1:
+                if i < len(self.node_rrefs):
                     current_rref = rref.remote().forward(current_rref)
-                else:
-                    # Last stage uses async to overlap compute/transfer
-                    future = rref.rpc_async().forward(current_rref)
-                
-                # Memory cleanup
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
+                # else:
+                #     # Last stage uses async to overlap compute/transfer
+                #     future = rref.rpc_async().forward(current_rref)
             
-            return torch.futures.wait_all([future])[0]
-
-    def reset_cache(self):
-        """Reset KV cache and position tracking across all stages"""
-        self.current_cache_position = 0
-        futures = []
-        for rref in self.node_rrefs:
-            futures.append(rref.rpc_async().reset_kv_cache())
-        torch.futures.wait_all(futures)
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+            # return torch.futures.wait_all([future])[0]
+            return current_rref.to_here()
 
     

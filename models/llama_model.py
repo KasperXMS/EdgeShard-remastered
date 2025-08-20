@@ -10,7 +10,7 @@ from transformers.modeling_outputs import BaseModelOutputWithPast, ModelOutput
 from dataclasses import dataclass
 from core.load_config import Config
 from core.distributed import DistributedModel
-from utils.monitor import MemoryMonitor
+from utils.monitor import MemoryMonitor, LatencyMonitor
 from utils.mem_check import aggregate_gpu_tensors, find_shape_grouped_tensor_referrers_in_range
 
 
@@ -18,6 +18,7 @@ from utils.mem_check import aggregate_gpu_tensors, find_shape_grouped_tensor_ref
 class IntermediateOutput(ModelOutput):
     hidden_states: torch.FloatTensor  # Only required field
     attention_mask: Optional[torch.Tensor] = None
+    timestamp_pack: Optional[List[float]] = None
     position_ids: Optional[torch.LongTensor] = None
     past_key_value: Optional[Tuple[Tuple[torch.FloatTensor]]] = None  # Align with HF Cache type
     output_attentions: Optional[bool] = None
@@ -26,22 +27,34 @@ class IntermediateOutput(ModelOutput):
     position_embeddings: Optional[torch.FloatTensor] = None
     flash_attn_kwargs: Optional[Dict[str, Any]] = None
 
+@dataclass
+class TimestampedOutputWithPast(BaseModelOutputWithPast):
+    past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
+    hidden_states: Optional[Tuple[torch.FloatTensor]] = None
+    attentions: Optional[Tuple[torch.FloatTensor]] = None
+    timestamp_pack: Optional[List[float]] = None
+
 
 class CustomLlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
     _tied_weights_keys = ["lm_head.weight"]
 
-    def __init__(self, config, runtime_config):
+    def __init__(self, config, runtime_config, distributed: bool = True):
         super().__init__(config)
         self.runtime_config = runtime_config
         self.memory_monitor = MemoryMonitor()
-        self.half()
-        
+        self.latency_monitor = LatencyMonitor()
+
         # Initialize your custom model instead of the original LlamaModel
-        self.model = DistributedModel(config, runtime_config, CustomLlamaModel)  # Replace with your custom model
-        
+        if distributed:
+            self.model = DistributedModel(config, runtime_config, CustomLlamaModel)
+        else:
+            self.model = CustomLlamaModel(config, 
+                                          (0, config.num_hidden_layers), 
+                                          "llama-3.1-8b/llama-3.1-8b.pth")
+
         # The following lines are copied from the original LlamaForCausalLM __init__
         self.vocab_size = config.vocab_size
-        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False).to("cuda").half()
+        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False).to("cuda")
         
         # Initialize weights and apply final processing
         self._initialize_weights()
@@ -68,7 +81,7 @@ class CustomLlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
         print("Initializing output layer weights")
         old_dict = torch.load(self.runtime_config.master.lm_head_weight_path)
         lm_head_state_dict = OrderedDict()
-        lm_head_state_dict['weight'] = old_dict['lm_head.weight'].half()
+        lm_head_state_dict['weight'] = old_dict['lm_head.weight']
         self.lm_head.load_state_dict(lm_head_state_dict)
         del old_dict
         print("Output layer weights initialized")
@@ -87,7 +100,7 @@ class CustomLlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
-        num_logits_to_keep: int = 0,
+        num_logits_to_keep: int = 1,
         **loss_kwargs,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         r"""
@@ -121,60 +134,74 @@ class CustomLlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
         "Hey, are you conscious? Can you talk to me?\nI'm not conscious, but I can talk to you."
         ```"""
 
-        if torch.cuda.is_available():
-            torch.cuda.reset_peak_memory_stats()
+        with torch.inference_mode():
 
-        token_count = input_ids.shape[-1] if input_ids is not None else 0
-
-        try:
-            output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-            output_hidden_states = (
-                output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-            )
-            return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-
-            # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
-            outputs = self.model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                position_ids=position_ids,
-                past_key_values=past_key_values,
-                inputs_embeds=inputs_embeds,
-                use_cache=use_cache,
-                output_attentions=output_attentions,
-                output_hidden_states=output_hidden_states,
-                return_dict=return_dict,
-                cache_position=cache_position,
-            )
-
-            hidden_states = outputs.last_hidden_state
-            if self.config.pretraining_tp > 1:
-                lm_head_slices = self.lm_head.weight.split(self.vocab_size // self.config.pretraining_tp, dim=0)
-                logits = [F.linear(hidden_states, lm_head_slices[i]) for i in range(self.config.pretraining_tp)]
-                logits = torch.cat(logits, dim=-1)
-            else:
-                # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
-                logits = self.lm_head(hidden_states[:, -num_logits_to_keep:, :].to(self.lm_head.weight.dtype))
-
-            loss = None
-            if labels is not None:
-                loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.vocab_size, **loss_kwargs)
-
-            if not return_dict:
-                output = (logits,) + outputs[1:]
-                return (loss,) + output if loss is not None else output
-
-            return CausalLMOutputWithPast(
-                loss=loss,
-                logits=logits,
-                past_key_values=outputs.past_key_values,
-                hidden_states=outputs.last_hidden_state,
-                attentions=outputs.attentions,
-            )
-        
-        finally:
             if torch.cuda.is_available():
-                self.memory_monitor.record_memory(token_count)
+                torch.cuda.reset_peak_memory_stats()
+
+            token_count = input_ids.shape[-1] if input_ids is not None else 0
+            timestamp_pack = []
+            timestamp_pack.append(time.time())
+
+            try:
+                output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+                output_hidden_states = (
+                    output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+                )
+                return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+                # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
+                outputs = self.model(
+                    input_ids=input_ids,
+                    timestamp_pack=timestamp_pack,
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
+                    past_key_values=past_key_values,
+                    inputs_embeds=inputs_embeds,
+                    use_cache=use_cache,
+                    output_attentions=output_attentions,
+                    output_hidden_states=output_hidden_states,
+                    return_dict=return_dict,
+                    cache_position=cache_position,
+                )
+
+                timestamp_pack.append(time.time())
+                hidden_states = outputs.last_hidden_state
+                if self.config.pretraining_tp > 1:
+                    lm_head_slices = self.lm_head.weight.split(self.vocab_size // self.config.pretraining_tp, dim=0)
+                    logits = [F.linear(hidden_states, lm_head_slices[i]) for i in range(self.config.pretraining_tp)]
+                    logits = torch.cat(logits, dim=-1)
+                else:
+                    # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
+                    logits = self.lm_head(hidden_states[:, -num_logits_to_keep:, :].to(self.lm_head.weight.dtype))
+
+                loss = None
+                if labels is not None:
+                    loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.vocab_size, **loss_kwargs)
+
+                if not return_dict:
+                    output = (logits,) + outputs[1:]
+                    return (loss,) + output if loss is not None else output
+                
+                past_key_values = outputs.past_key_values if use_cache else None
+                hidden_states = outputs.hidden_states if output_hidden_states else None
+                attentions = outputs.attentions if output_attentions else None
+                timestamp_pack = outputs.timestamp_pack if outputs.timestamp_pack else None
+
+                timestamp_pack.append(time.time())
+                self.latency_monitor.append_entry(timestamp_pack)
+
+                return CausalLMOutputWithPast(
+                    loss=loss,
+                    logits=logits,
+                    past_key_values=past_key_values,
+                    hidden_states=hidden_states,
+                    attentions=attentions,
+                )
+
+            finally:
+                if torch.cuda.is_available():
+                    self.memory_monitor.record_memory(token_count)
     
     def reset_cache(self):
         """Reset cache across all pipeline stages"""
@@ -210,8 +237,7 @@ class CustomLlamaModel(LlamaPreTrainedModel):
 
     def __init__(self, config: LlamaConfig, offset: Tuple[int, int], ckpt_path: str):
         super().__init__(config)
-        self.half()
-        torch.set_default_tensor_type(torch.HalfTensor)
+        torch.set_default_dtype(torch.bfloat16)
 
         self.max_cache_size = config.max_position_embeddings  # Or set appropriate limit
         self.current_cache_size = 0
@@ -236,12 +262,20 @@ class CustomLlamaModel(LlamaPreTrainedModel):
         self.ckpt_path = ckpt_path
 
         # Initialize weights and apply final processing
-        self._initialize_weights()
+        if offset[0] == 0 and offset[1] == config.num_hidden_layers:
+            checkpoint = torch.load(self.ckpt_path)['state_dict']
+            state_dict = {
+                k[6:]: v.half() if v.is_floating_point() else v
+                for k, v in checkpoint.items() if k.startswith('model.')
+            }
+            self.load_state_dict(state_dict, strict=True)
+        else:
+            self._initialize_weights()
 
     def _initialize_weights(self):
         prev_time = time.time()
         print(f'Loading checkpoint shard "{self.ckpt_path}"')
-        checkpoint = torch.load(self.ckpt_path, map_location="cpu")
+        checkpoint = torch.load(self.ckpt_path)
         print(f"Loaded checkpoint in {time.time() - prev_time:.6f}s")
         prev_time = time.time()
         state_dict = {
@@ -270,8 +304,10 @@ class CustomLlamaModel(LlamaPreTrainedModel):
 
     def forward(
         self,
-        input_data: RRef,
+        input_data: Optional[RRef] = None,
+        timestamp_pack: Optional[List] = None,
         attention_mask: Optional[torch.Tensor] = None,
+        input_ids: Optional[torch.LongTensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
         past_key_values: Optional[Cache] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
@@ -282,185 +318,227 @@ class CustomLlamaModel(LlamaPreTrainedModel):
         cache_position: Optional[torch.LongTensor] = None,
         **flash_attn_kwargs,
     ) -> Union[Tuple, Dict[str, Any]]:
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
-        use_cache = use_cache if use_cache is not None else self.config.use_cache
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-
-        all_hidden_states = () if output_hidden_states else None
-        all_self_attns = () if output_attentions else None
-
-        if isinstance(input_data, torch._C._distributed_rpc.PyRRef):
-            input_data = input_data.to_here()
-
-        if self.offset[0] == 0:
-            # input_data: dict = input_data.to_here()
-            input_ids = input_data['input_ids']
-            attention_mask = input_data['attention_mask']
-            position_ids = input_data['position_ids']
-            past_key_values = input_data['past_key_values']
-            inputs_embeds = input_data['inputs_embeds']
-            cache_position = input_data['cache_position']
-            use_cache = input_data['use_cache']
-            output_attentions = input_data['output_attentions']
-            output_hidden_states = input_data['output_hidden_states']
-            return_dict = input_data['return_dict']
-
-            if (input_ids is None) ^ (inputs_embeds is not None):
-                raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
-
-            if self.gradient_checkpointing and self.training and use_cache:
-                logger.warning_once(
-                    "`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`."
-                )
-                use_cache = False
-
-            if inputs_embeds is None:
-                inputs_embeds = self.embed_tokens(input_ids).half()
-
-            if cache_position is None:
-                past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
-                cache_position = torch.arange(
-                    past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device
-                )
-
-            if position_ids is None:
-                position_ids = cache_position.unsqueeze(0)
-
-            past_len = self._kv_cache.get_seq_length() if self._kv_cache else 0
-            if (attention_mask is not None
-                and past_len > 0
-                and attention_mask.shape[-1] != past_len + input_ids.shape[1]):
-                pad = attention_mask.new_ones(attention_mask.size(0), past_len)
-                attention_mask = torch.cat([pad, attention_mask], dim=-1)
-
-            if use_cache:
-                if self._kv_cache is None:
-                    self._kv_cache = DynamicCache().half()
-
-                if self._kv_cache.get_seq_length() > self.max_cache_size:
-                    # Prune oldest half of cache
-                    keep_from = self._kv_cache.get_seq_length() // 2
-                    self._kv_cache = self._kv_cache.prune(keep_from)
-                    self.current_cache_size = self._kv_cache.get_seq_length()
-
-            past_key_values = self._kv_cache
-
-            causal_mask = self._update_causal_mask(
-                attention_mask, inputs_embeds, cache_position, past_key_values, output_attentions
+        with torch.inference_mode():
+            start = torch.cuda.Event(True)
+            end = torch.cuda.Event(True)
+            start.record()
+            if timestamp_pack is not None:
+                timestamp_pack.append(time.time())
+            output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+            output_hidden_states = (
+                output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
             )
+            use_cache = use_cache if use_cache is not None else self.config.use_cache
+            return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-            hidden_states = inputs_embeds
-
-            # create position embeddings to be shared across the decoder layers
-            position_embeddings = self.rotary_emb(hidden_states, position_ids)
-
-            # decoder layers
             all_hidden_states = () if output_hidden_states else None
             all_self_attns = () if output_attentions else None
-        else:
-            # input_data: dict = input_data.to_here()
-            hidden_states = input_data.hidden_states
-            attention_mask = input_data.attention_mask
-            position_ids = input_data.position_ids
-            cache_position = input_data.cache_position
-            
-            past_len = self._kv_cache.get_seq_length() if self._kv_cache else 0
-            if (attention_mask is not None
-                and past_len > 0
-                and attention_mask.shape[-1] != past_len + input_ids.shape[1]):
-                pad = attention_mask.new_ones(attention_mask.size(0), past_len)
-                attention_mask = torch.cat([pad, attention_mask], dim=-1)
 
-            if use_cache:
-                if self._kv_cache is None:
-                    self._kv_cache = DynamicCache().half()
+            if isinstance(input_data, torch._C._distributed_rpc.PyRRef):
+                input_data = input_data.to_here()
 
-                if self._kv_cache.get_seq_length() > self.max_cache_size:
-                    # Prune oldest half of cache
-                    keep_from = self._kv_cache.get_seq_length() // 2
-                    self._kv_cache = self._kv_cache.prune(keep_from)
-                    self.current_cache_size = self._kv_cache.get_seq_length()
+            if self.offset[0] == 0:
+                # input_data: dict = input_data.to_here()
+                if input_data is not None:
+                    input_ids = input_data['input_ids']
+                    attention_mask = input_data['attention_mask']
+                    position_ids = input_data['position_ids']
+                    past_key_values = input_data['past_key_values']
+                    inputs_embeds = input_data['inputs_embeds']
+                    cache_position = input_data['cache_position']
+                    use_cache = input_data['use_cache']
+                    output_attentions = input_data['output_attentions']
+                    output_hidden_states = input_data['output_hidden_states']
+                    return_dict = input_data['return_dict']
+                    timestamp_pack = input_data['timestamp_pack'] if 'timestamp_pack' in input_data else None
 
-            past_key_values = self._kv_cache
+                    if timestamp_pack is not None:
+                        timestamp_pack.append(time.time())
 
-            position_embeddings = self.rotary_emb(hidden_states, position_ids)
-            output_attentions = input_data.output_attentions
-            use_cache = input_data.use_cache
-            flash_attn_kwargs = input_data.flash_attn_kwargs
+                if (input_ids is None) ^ (inputs_embeds is not None):
+                    raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
 
-            causal_mask = self._update_causal_mask(
-                attention_mask, hidden_states, cache_position, past_key_values, output_attentions
-            )
+                if self.gradient_checkpointing and self.training and use_cache:
+                    logger.warning_once(
+                        "`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`."
+                    )
+                    use_cache = False
 
-        for decoder_layer in self.layers:
-            if output_hidden_states:
-                all_hidden_states += (hidden_states,)
+                if inputs_embeds is None:
+                    inputs_embeds = self.embed_tokens(input_ids)
 
-            if self.gradient_checkpointing and self.training:
-                layer_outputs = self._gradient_checkpointing_func(
-                    decoder_layer.__call__,
-                    hidden_states,
-                    causal_mask,
-                    position_ids,
-                    past_key_values,
-                    output_attentions,
-                    use_cache,
-                    cache_position,
-                    position_embeddings,
+                if cache_position is None:
+                    past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
+                    cache_position = torch.arange(
+                        past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device
+                    )
+
+                if position_ids is None:
+                    position_ids = cache_position.unsqueeze(0)
+
+                past_len = self._kv_cache.get_seq_length() if self._kv_cache else 0
+                if (attention_mask is not None
+                    and past_len > 0
+                    and attention_mask.shape[-1] != past_len + input_ids.shape[1]):
+                    pad = attention_mask.new_ones(attention_mask.size(0), past_len)
+                    attention_mask = torch.cat([pad, attention_mask], dim=-1)
+
+                if use_cache:
+                    if self._kv_cache is None:
+                        self._kv_cache = DynamicCache()
+
+                past_key_values = self._kv_cache
+
+                causal_mask = self._update_causal_mask(
+                    attention_mask, inputs_embeds, cache_position, past_key_values, output_attentions
                 )
+
+                hidden_states = inputs_embeds
+
+                # create position embeddings to be shared across the decoder layers
+                position_embeddings = self.rotary_emb(hidden_states, position_ids)
+
+                # decoder layers
+                all_hidden_states = () if output_hidden_states else None
+                all_self_attns = () if output_attentions else None
             else:
-                layer_outputs = decoder_layer(
-                    hidden_states,
-                    attention_mask=causal_mask,
-                    position_ids=position_ids,
-                    past_key_value=past_key_values,
-                    output_attentions=output_attentions,
-                    use_cache=use_cache,
-                    cache_position=cache_position,
-                    position_embeddings=position_embeddings,
-                    **flash_attn_kwargs,
-                )
+                # input_data: dict = input_data.to_here()
+                hidden_states = input_data.hidden_states
+                attention_mask = input_data.attention_mask
+                position_ids = input_data.position_ids
+                cache_position = input_data.cache_position
+                position_embeddings = input_data.position_embeddings
+                timestamp_pack = input_data.timestamp_pack if 'timestamp_pack' in input_data else None
 
-            hidden_states = layer_outputs[0]
+                if use_cache:
+                    if self._kv_cache is None:
+                        self._kv_cache = DynamicCache()
 
-            if output_attentions:
-                all_self_attns += (layer_outputs[1],)
+                past_key_values = self._kv_cache
 
-            if use_cache:
-                self._kv_cache = past_key_values
-            
-        if self.offset[1] == self.config.num_hidden_layers:
-            hidden_states = self.norm(hidden_states)
+                if timestamp_pack is not None:
+                    timestamp_pack.append(time.time())
 
-            # add hidden states from the last decoder layer
-            if output_hidden_states:
-                all_hidden_states += (hidden_states,)
-        
-            output = BaseModelOutputWithPast(
-                last_hidden_state=hidden_states,
-                past_key_values=past_key_values if use_cache else None,
-                hidden_states=all_hidden_states,
-                attentions=all_self_attns,
-            )
-            return output if return_dict else tuple(output.values())
-        else:
-            # assign output as a dict
-            output = IntermediateOutput(
-                hidden_states,
-                attention_mask=causal_mask,
-                position_ids=position_ids,
-                past_key_value=None,
-                output_attentions=output_attentions,
-                use_cache=use_cache,
-                cache_position=cache_position,
-                position_embeddings=None,
-                flash_attn_kwargs=flash_attn_kwargs,
-            )
-            
-            return output
+                past_len = self._kv_cache.get_seq_length() if self._kv_cache else 0
+                if (attention_mask is not None
+                    and past_len > 0
+                    and attention_mask.shape[-1] != past_len + input_ids.shape[1]):
+                    pad = attention_mask.new_ones(attention_mask.size(0), past_len)
+                    attention_mask = torch.cat([pad, attention_mask], dim=-1)
+                    print(pad)
+
+                # position_embeddings = self.rotary_emb(hidden_states, position_ids)
+                output_attentions = input_data.output_attentions
+                use_cache = input_data.use_cache
+                flash_attn_kwargs = input_data.flash_attn_kwargs
+
+                # causal_mask = self._update_causal_mask(
+                #     attention_mask, hidden_states, cache_position, past_key_values, output_attentions
+                # )
+                causal_mask = attention_mask
+
+            for decoder_layer in self.layers:
+                if output_hidden_states:
+                    all_hidden_states += (hidden_states,)
+
+                if self.gradient_checkpointing and self.training:
+                    layer_outputs = self._gradient_checkpointing_func(
+                        decoder_layer.__call__,
+                        hidden_states,
+                        causal_mask,
+                        position_ids,
+                        past_key_values,
+                        output_attentions,
+                        use_cache,
+                        cache_position,
+                        position_embeddings,
+                    )
+                else:
+                    layer_outputs = decoder_layer(
+                        hidden_states,
+                        attention_mask=causal_mask,
+                        position_ids=position_ids,
+                        past_key_value=past_key_values,
+                        output_attentions=output_attentions,
+                        use_cache=use_cache,
+                        cache_position=cache_position,
+                        position_embeddings=position_embeddings,
+                        **flash_attn_kwargs,
+                    )
+
+                hidden_states = layer_outputs[0]
+
+                if output_attentions:
+                    all_self_attns += (layer_outputs[1],)
+
+                if use_cache:
+                    self._kv_cache = past_key_values
+                
+            if self.offset[1] == self.config.num_hidden_layers:
+                hidden_states = self.norm(hidden_states)
+                hidden_states = hidden_states.detach()
+
+                # add hidden states from the last decoder layer
+                if output_hidden_states:
+                    all_hidden_states += (hidden_states,)
+
+                if timestamp_pack is not None:
+                    timestamp_pack.append(time.time())
+                    output = TimestampedOutputWithPast(
+                        last_hidden_state=hidden_states,
+                        past_key_values=past_key_values if use_cache else None,
+                        hidden_states=all_hidden_states,
+                        attentions=all_self_attns,
+                        timestamp_pack=timestamp_pack,
+                    )
+                else:
+                    output = BaseModelOutputWithPast(
+                        last_hidden_state=hidden_states,
+                        past_key_values=past_key_values if use_cache else None,
+                        hidden_states=all_hidden_states,
+                        attentions=all_self_attns,
+                    )
+
+                end.record()
+                end.synchronize()
+                print(f"Forward pass took {start.elapsed_time(end):.2f} ms")
+                return output if return_dict else tuple(output.values())
+            else:
+                # assign output as a dict
+                hidden_states = hidden_states.detach()
+
+                if timestamp_pack is not None:
+                    timestamp_pack.append(time.time())
+                    output = IntermediateOutput(
+                        hidden_states,
+                        attention_mask=causal_mask,
+                        position_ids=position_ids,
+                        timestamp_pack=timestamp_pack,
+                        past_key_value=None,
+                        output_attentions=output_attentions,
+                        use_cache=use_cache,
+                        cache_position=cache_position,
+                        position_embeddings=position_embeddings,
+                        flash_attn_kwargs=flash_attn_kwargs,
+                    )
+                else:
+                    output = IntermediateOutput(
+                        hidden_states,
+                        attention_mask=causal_mask,
+                        position_ids=position_ids,
+                        past_key_value=None,
+                        output_attentions=output_attentions,
+                        use_cache=use_cache,
+                        cache_position=cache_position,
+                        position_embeddings=position_embeddings,
+                        flash_attn_kwargs=flash_attn_kwargs,
+                    ) 
+
+                end.record()
+                end.synchronize()
+                print(f"Forward pass took {start.elapsed_time(end):.2f} ms")
+
+                return output
         
     def post_process(self):
         """
