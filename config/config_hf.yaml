@@ -4,6 +4,8 @@ master:
   interface: "enp4s0"
   lm_head_weight_path: "model_shards/shard_2.pth"
 
+model_name: "deepseek-ai/DeepSeek-R1-Distill-Qwen-14B"
+
 workers:
   - 
     name: worker0

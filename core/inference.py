@@ -67,8 +67,10 @@ class ConversationManager:
             self.history.pop(0)
 
 def inference():
-    model_name = "meta-llama/Llama-3.1-8B-Instruct"   
     runtime_cfg = load_config("config/config_hf.yaml")
+    if runtime_cfg is None:
+        raise RuntimeError("无法加载配置文件 config/config_hf.yaml")
+    model_name = getattr(runtime_cfg, 'model_name', "meta-llama/Llama-3.1-8B-Instruct")
     torch.set_default_dtype(torch.bfloat16)
 
     with memory_management_ctx():

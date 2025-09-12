@@ -1,5 +1,13 @@
 import yaml
 from dataclasses import dataclass
+from typing import List, Dict, Any, Optional
+
+@dataclass
+class Master:
+    ip: str = ""
+    port: str = ""
+    interface: str = ""
+    lm_head_weight_path: str = ""
 
 @dataclass
 class Worker:
@@ -11,48 +19,30 @@ class Worker:
     ckpt_path: str = ""
 
 class Config:
-    def __init__(self, config_dict):
-        self.master = Master(**config_dict['master'])
-        # Ensure that workers are processed correctly
-        self.workers = []
-        for worker_dict in config_dict.get('workers', []):
-            self.workers.append(Worker(**worker_dict))
+    def __init__(self, config_dict: Dict[str, Any]):
+        # 模型名称（如果未提供则使用默认 Llama-3.1-8B-Instruct）
+        self.model_name: str = config_dict.get('model_name', "meta-llama/Llama-3.1-8B-Instruct")
+        # Master 节点配置
+        self.master: Master = Master(**config_dict.get('master', {}))
+        # Worker 列表
+        self.workers: List[Worker] = [Worker(**w) for w in config_dict.get('workers', [])]
 
-@dataclass
-class Master:
-    ip: str = ""
-    port: str = ""
-    interface: str = ""
-    lm_head_weight_path: str = ""
+    def __repr__(self) -> str:
+        return f"Config(model_name={self.model_name}, master={self.master}, workers={len(self.workers)})"
 
-# Load the configuration from a YAML file
-def load_config(config_file):
+def load_config(config_file: str) -> Optional[Config]:
+    """从 YAML 文件加载配置.
+    返回 Config 实例或 None (解析失败)。"""
     try:
         with open(config_file, 'r') as f:
-            config_dict = yaml.safe_load(f)
+            config_dict = yaml.safe_load(f) or {}
             return Config(config_dict)
+    except FileNotFoundError:
+        print(f"配置文件未找到: {config_file}")
     except yaml.YAMLError as e:
-        print(f"Error loading YAML configuration: {e}")
-        return None
+        print(f"解析 YAML 出错: {e}")
+    return None
 
-# Example usage
 if __name__ == "__main__":
-    # Assuming the YAML content is in a file named 'config.yaml'
-    config = load_config('config/config.yaml')
-    
-    if config is not None:
-        # Access master configuration
-        print(f"Master IP: {config.master.ip}")
-        print(f"Master Port: {config.master.port}")
-        print(f"Master Interface: {config.master.interface}")
-
-        # Access worker configurations
-        for worker in config.workers:
-            print(f"\nWorker name: {worker.name}")
-            print(f"Worker IP: {worker.ip}")
-            print(f"Interface: {worker.interface}")
-            print(f"Start Range: {worker.start}")
-            print(f"End Range: {worker.end}")
-            print(f"Checkpoint file path: {worker.ckpt_path}")
-    else:
-        print("Failed to load configuration.")
+    cfg = load_config('config/config_hf.yaml')
+    print(cfg)
