@@ -89,11 +89,11 @@ def inference():
             del dummy_input
 
     conv_manager = ConversationManager(tok, max_history=3)
-    print("输入 '/exit' 结束对话")
+    print("Type '/exit' to end the conversation")
     
     while True:
         try:
-            user_input = input("用户: ").strip()
+            user_input = input("User: ").strip()
             if user_input.lower() == "/exit":     
                 model.post_process()
                 model.memory_monitor.save_to_csv()
@@ -140,7 +140,7 @@ def inference():
                 thread = threading.Thread(target=model.generate, kwargs=gen_kwargs)
                 thread.start()
 
-                print("模型: ", end="", flush=True)
+                print("Model: ", end="", flush=True)
                 reply_text = ""
                 for new_chunk in streamer:
                     print(new_chunk, end="", flush=True)
@@ -162,13 +162,13 @@ def inference():
             rpc.shutdown()
             sys.exit(0)
         except torch.cuda.OutOfMemoryError:
-            print("\n内存不足，正在清理...")
+            print("\nOut of memory, cleaning up...")
             conv_manager.history = conv_manager.history[-2:]  # Keep only last exchange
             torch.cuda.empty_cache()
             gc.collect()
             continue
         except Exception as e:
-            print(f"\n发生错误: {str(e)}")
+            print(f"\nError occurred: {str(e)}")
             torch.cuda.empty_cache()
             continue
 
