@@ -1,0 +1,25 @@
+# Example EdgeShard service specification
+# This expresses WHAT to serve, not HOW to shard it.
+
+name: qwen25-7b-demo
+
+model:
+  name: Qwen/Qwen2.5-7B-Instruct
+  revision: main
+  dtype: float16
+
+runtime:
+  backend: torch
+  max_batch_size: 1
+  max_sequence_length: 4096
+
+scheduling:
+  policy: default
+  hints:
+    latency_weight: 0.5
+
+deployment:
+  backend: docker
+  shard_image: edgeshard/shard:latest
+  resource_limits:
+    memory: 16Gi

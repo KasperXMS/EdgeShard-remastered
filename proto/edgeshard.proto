@@ -1,0 +1,179 @@
+syntax = "proto3";
+
+package edgeshard;
+
+// ===========================================================================
+// Common types
+// ===========================================================================
+
+message DeviceInfo {
+  string device_id = 1;
+  string device_type = 2;  // "cuda", "jetson", "cpu"
+  string name = 3;
+  int32 total_memory_mb = 4;
+  string compute_capability = 5;
+  map<string, string> properties = 6;
+}
+
+message WorkerState {
+  string worker_id = 1;
+  string hostname = 2;
+  repeated DeviceInfo devices = 3;
+  int32 available_memory_mb = 4;
+  int32 cpu_count = 5;
+  string status = 6;  // "online", "offline", "busy"
+  map<string, string> metadata = 7;
+  int64 last_heartbeat = 8;  // Unix timestamp
+}
+
+// ===========================================================================
+// Worker Registration
+// ===========================================================================
+
+message RegisterWorkerRequest {
+  string worker_id = 1;
+  string hostname = 2;
+  repeated DeviceInfo devices = 3;
+  int32 available_memory_mb = 4;
+  int32 cpu_count = 5;
+  map<string, string> metadata = 6;
+}
+
+message RegisterWorkerResponse {
+  bool success = 1;
+  string message = 2;
+  string master_id = 3;
+}
+
+message HeartbeatRequest {
+  string worker_id = 1;
+  int32 available_memory_mb = 2;
+  string status = 3;
+  map<string, string> metadata = 4;
+}
+
+message HeartbeatResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message UnregisterWorkerRequest {
+  string worker_id = 1;
+}
+
+message UnregisterWorkerResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+// ===========================================================================
+// Cluster Discovery
+// ===========================================================================
+
+message ListWorkersRequest {}
+
+message ListWorkersResponse {
+  repeated WorkerState workers = 1;
+}
+
+message GetWorkerRequest {
+  string worker_id = 1;
+}
+
+message GetWorkerResponse {
+  WorkerState worker = 1;
+}
+
+// ===========================================================================
+// Service Management
+// ===========================================================================
+
+message ServiceSpec {
+  string name = 1;
+  string model_name = 2;
+  string model_revision = 3;
+  string dtype = 4;
+  int32 max_batch_size = 5;
+  int32 max_sequence_length = 6;
+  string scheduling_policy = 7;
+}
+
+message DeployServiceRequest {
+  ServiceSpec spec = 1;
+}
+
+message DeployServiceResponse {
+  bool success = 1;
+  string message = 2;
+  string service_name = 3;
+}
+
+message ListServicesRequest {}
+
+message ListServicesResponse {
+  repeated string service_names = 1;
+}
+
+message GetServiceStatusRequest {
+  string service_name = 1;
+}
+
+message GetServiceStatusResponse {
+  string service_name = 1;
+  string status = 2;  // "deploying", "ready", "failed", "stopped"
+  int32 shard_count = 3;
+  string message = 4;
+}
+
+message StopServiceRequest {
+  string service_name = 1;
+}
+
+message StopServiceResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+// ===========================================================================
+// Profiling
+// ===========================================================================
+
+message ProfileRequest {
+  string model_name = 1;
+  string model_revision = 2;
+  string dtype = 3;
+  string device = 4;
+}
+
+message ProfileResponse {
+  bool success = 1;
+  string message = 2;
+  float layer_forward_ms = 3;
+  float kv_cache_per_token_mb = 4;
+  float prefill_tokens_per_sec = 5;
+  float decode_tokens_per_sec = 6;
+}
+
+// ===========================================================================
+// Services
+// ===========================================================================
+
+service WorkerService {
+  // Worker registration and lifecycle
+  rpc RegisterWorker(RegisterWorkerRequest) returns (RegisterWorkerResponse);
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+  rpc UnregisterWorker(UnregisterWorkerRequest) returns (UnregisterWorkerResponse);
+
+  // Cluster discovery
+  rpc ListWorkers(ListWorkersRequest) returns (ListWorkersResponse);
+  rpc GetWorker(GetWorkerRequest) returns (GetWorkerResponse);
+
+  // Service management
+  rpc DeployService(DeployServiceRequest) returns (DeployServiceResponse);
+  rpc ListServices(ListServicesRequest) returns (ListServicesResponse);
+  rpc GetServiceStatus(GetServiceStatusRequest) returns (GetServiceStatusResponse);
+  rpc StopService(StopServiceRequest) returns (StopServiceResponse);
+
+  // Profiling
+  rpc Profile(ProfileRequest) returns (ProfileResponse);
+}

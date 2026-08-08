@@ -1,0 +1,51 @@
+syntax = "proto3";
+
+package edgeshard.shard;
+
+// Shard-to-shard tensor transfer protocol.
+// This is the DATA PLANE — Master is not involved.
+
+message TensorMessage {
+  // Tensor shape
+  repeated int64 shape = 1;
+  // Tensor dtype (e.g., "float16", "float32")
+  string dtype = 2;
+  // Raw tensor data
+  bytes data = 3;
+  // Session ID for routing
+  string session_id = 4;
+}
+
+message SendTensorRequest {
+  string source_shard_id = 1;
+  string target_shard_id = 2;
+  TensorMessage tensor = 3;
+}
+
+message SendTensorResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message RecvTensorRequest {
+  string session_id = 1;
+  string source_shard_id = 2;
+}
+
+message RecvTensorResponse {
+  bool success = 1;
+  string message = 2;
+  TensorMessage tensor = 3;
+}
+
+// Shard service — each shard runs this
+service ShardService {
+  // Send tensor to this shard
+  rpc SendTensor(SendTensorRequest) returns (SendTensorResponse);
+
+  // Receive tensor from this shard (pull model)
+  rpc RecvTensor(RecvTensorRequest) returns (RecvTensorResponse);
+
+  // Health check
+  rpc Ping(RecvTensorRequest) returns (SendTensorResponse);
+}
