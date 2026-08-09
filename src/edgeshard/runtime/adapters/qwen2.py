@@ -174,7 +174,8 @@ class Qwen2Adapter(ModelAdapter):
         # Transformer layers
         self._layers = []
         for i in range(layer_end - layer_start):
-            layer = Qwen2DecoderLayer(config, layer_idx=layer_start + i)
+            # Use local layer index (0, 1, 2, ...) for DynamicCache compatibility
+            layer = Qwen2DecoderLayer(config, layer_idx=i)
             # Load weights for this layer
             layer_weights = {
                 k.replace(f"model.layers.{i}.", ""): v
