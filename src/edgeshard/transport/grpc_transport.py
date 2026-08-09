@@ -63,10 +63,11 @@ def tensor_to_message(tensor: torch.Tensor, session_id: str) -> shard_pb2.Tensor
 
     # Serialize to bytes
     # bfloat16 is not supported by numpy, so cast to float32
+    # Use .detach() in case tensor requires grad
     if tensor.dtype == torch.bfloat16:
-        data = tensor.cpu().to(torch.float32).numpy().tobytes()
+        data = tensor.detach().cpu().to(torch.float32).numpy().tobytes()
     else:
-        data = tensor.cpu().numpy().tobytes()
+        data = tensor.detach().cpu().numpy().tobytes()
 
     return shard_pb2.TensorMessage(
         shape=list(tensor.shape),
