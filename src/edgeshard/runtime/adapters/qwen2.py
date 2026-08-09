@@ -321,7 +321,6 @@ class Qwen2Adapter(ModelAdapter):
         position_embeddings = (cos, sin)
 
         # Compute cache_position for correct attention masking with KV cache
-        # cache_position tells the layer where in the sequence the current tokens are
         if hasattr(kv_cache, 'get_seq_length') and kv_cache.get_seq_length() > 0:
             # Decode phase: we have cached tokens
             cached_len = kv_cache.get_seq_length()
@@ -333,32 +332,29 @@ class Qwen2Adapter(ModelAdapter):
             # Prefill phase: no cache yet
             cache_position = torch.arange(seq_len, device=hidden_states.device)
 
-        # Build attention mask for causal attention
-        # When using KV cache, we need a 1D mask of shape [batch, 1, target_len, source_len]
-        # where target_len = seq_len (current input) and source_len = cached_len + seq_len
-        if hasattr(kv_cache, 'get_seq_length') and kv_cache.get_seq_length() > 0:
-            cached_len = kv_cache.get_seq_length()
-            target_len = seq_len
-            source_len = cached_len + seq_len
-            # Causal mask: each position can attend to all cached + current up to itself
-            causal_mask = torch.triu(
-                torch.full((target_len, source_len), float('-inf'), device=hidden_states.device),
-                diagonal=cached_len + 1,
-            )
-            attention_mask = causal_mask.unsqueeze(0).unsqueeze(0)  # [1, 1, target_len, source_len]
-        else:
-            attention_mask = None
+        # Build causal attention mask — ALWAYS needed, even in prefill!
+        # Without it, each token can attend to future tokens, producing garbage output.
+        cached_len = kv_cache.get_seq_length() if hasattr(kv_cache, 'get_seq_length') else 0
+        target_len = seq_len
+        source_len = cached_len + seq_len
+
+        # Causal mask: position i can attend to positions [0, cached_len + i]
+        # Shape: [1, 1, target_len, source_len]
+        causal_mask = torch.triu(
+            torch.full((target_len, source_len), float('-inf'),
+                       device=hidden_states.device, dtype=hidden_states.dtype),
+            diagonal=cached_len + 1,
+        )
+        attention_mask = causal_mask.unsqueeze(0).unsqueeze(0)
 
         logger.debug(
             f"Forward: hidden_states={hidden_states.shape}, "
             f"position_ids={position_ids}, cache_position={cache_position}, "
-            f"kv_cache_type={type(kv_cache).__name__}, "
-            f"kv_cache_seq_len={kv_cache.get_seq_length() if hasattr(kv_cache, 'get_seq_length') else 'N/A'}"
+            f"attention_mask={attention_mask.shape}, "
+            f"kv_cache_seq_len={cached_len}"
         )
 
         for i, layer in enumerate(self._layers):
-            # Call the layer with the standard API for transformers 4.44.0
-            # kv_cache is a DynamicCache object that manages all layers internally
             try:
                 outputs = layer(
                     hidden_states,
