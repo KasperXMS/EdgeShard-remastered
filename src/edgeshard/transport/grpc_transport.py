@@ -62,7 +62,11 @@ def tensor_to_message(tensor: torch.Tensor, session_id: str) -> shard_pb2.Tensor
         raise ValueError(f"Unsupported dtype: {tensor.dtype}")
 
     # Serialize to bytes
-    data = tensor.cpu().numpy().tobytes()
+    # bfloat16 is not supported by numpy, so cast to float32
+    if tensor.dtype == torch.bfloat16:
+        data = tensor.cpu().to(torch.float32).numpy().tobytes()
+    else:
+        data = tensor.cpu().numpy().tobytes()
 
     return shard_pb2.TensorMessage(
         shape=list(tensor.shape),
@@ -90,9 +94,14 @@ def message_to_tensor(message: shard_pb2.TensorMessage, device: torch.device) ->
         raise ValueError(f"Unknown dtype: {message.dtype}")
 
     # Deserialize from bytes
+    # bfloat16 was serialized as float32, so we need to cast back
     shape = tuple(message.shape)
-    array = np.frombuffer(message.data, dtype=_numpy_dtype(dtype)).reshape(shape)
-    tensor = torch.from_numpy(array).to(device)
+    if dtype == torch.bfloat16:
+        array = np.frombuffer(message.data, dtype=np.float32).reshape(shape)
+        tensor = torch.from_numpy(array.copy()).to(dtype=dtype, device=device)
+    else:
+        array = np.frombuffer(message.data, dtype=_numpy_dtype(dtype)).reshape(shape)
+        tensor = torch.from_numpy(array.copy()).to(device)
 
     return tensor
 
@@ -141,7 +150,7 @@ class GrpcTensorTransport(TensorTransport):
         # Create channels to all other shards
         for sid, addr in shard_addresses.items():
             if sid != shard_id:
-                channel = grpc.insecure_channel(addr)
+                channel = grpc.aio.insecure_channel(addr)
                 self._channels[sid] = channel
                 self._stubs[sid] = shard_pb2_grpc.ShardServiceStub(channel)
                 logger.info(f"Transport {shard_id} connected to shard {sid} at {addr}")

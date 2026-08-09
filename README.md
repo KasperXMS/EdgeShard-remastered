@@ -7,6 +7,95 @@ Config-driven distributed inference for heterogeneous edge and GPU resources.
 
 EdgeShard automatically discovers worker capabilities, profiles model execution, plans model sharding and placement, deploys runtime instances, and serves distributed autoregressive inference — all from a single service YAML.
 
+## Installation
+
+### Prerequisites
+
+- **Conda** (Miniconda or Anaconda)
+- **Git**
+- **GPU**: NVIDIA Driver compatible with CUDA 12.1 (for GPU setup)
+
+### Setup Environment
+
+Choose the appropriate environment for your hardware:
+
+#### Option 1: NVIDIA GPU (CUDA 12.1)
+
+```bash
+# Clone the repository
+git clone <repo-url>
+cd EdgeShard-remastered
+
+# Create conda environment with CUDA support
+conda env create -f environment.yml
+
+# Activate the environment
+conda activate edgeshard
+```
+
+#### Option 2: AMD GPU (ROCm)
+
+```bash
+# Create conda environment with ROCm support
+conda env create -f environment-rocm.yml
+
+# Activate the environment
+conda activate edgeshard-rocm
+```
+
+#### Option 3: CPU Only (no GPU)
+
+```bash
+# Create conda environment for CPU-only
+conda env create -f environment-cpu.yml
+
+# Activate the environment
+conda activate edgeshard-cpu
+```
+
+### Install EdgeShard
+
+```bash
+# Install EdgeShard in editable mode
+pip install -e .
+
+# Verify installation
+edgeshard --version
+python -c "import torch; print(f'PyTorch: {torch.__version__}, CUDA: {torch.cuda.is_available()}')"
+python -c "import transformers; print(f'Transformers: {transformers.__version__}')"
+```
+
+### Environment Details
+
+**GPU Environment** (`environment.yml`):
+- Python 3.10
+- PyTorch 2.1.0 with CUDA 12.1
+- Transformers 4.44.0
+- pynvml for GPU monitoring
+
+**CPU Environment** (`environment-cpu.yml`):
+- Python 3.10
+- PyTorch 2.1.0 (CPU only)
+- Transformers 4.44.0
+- No GPU-specific dependencies
+
+### Troubleshooting
+
+**CUDA driver mismatch**: If you see "NVIDIA driver is too old", your driver doesn't support CUDA 12.1. Update your driver or modify `environment.yml` to use `pytorch-cuda=11.8`.
+
+**Transformers version**: Must be 4.44.0. Newer versions have incompatible Qwen2 API changes.
+
+**Recreate environment**:
+```bash
+conda env remove -n edgeshard
+conda env create -f environment.yml
+```
+
+**List all environments**:
+```bash
+conda env list
+```
+
 ## Quick Start
 
 ```bash

@@ -136,6 +136,12 @@ class PipelineOrchestrator:
         if session_id not in self._sessions:
             raise SessionError(f"Session {session_id} does not exist")
 
+        # Single-shard pipeline: just embed + forward + logits
+        if len(self._shards) == 1:
+            return await self._shards[0].shard.prefill(
+                session_id, input_ids=input_ids
+            )
+
         # First shard: embed + forward
         first_shard = self._shards[0]
         hidden_states = await first_shard.shard.prefill(
@@ -203,6 +209,12 @@ class PipelineOrchestrator:
         """
         if session_id not in self._sessions:
             raise SessionError(f"Session {session_id} does not exist")
+
+        # Single-shard pipeline: just embed + forward + logits
+        if len(self._shards) == 1:
+            return await self._shards[0].shard.decode(
+                session_id, token_id=token_id
+            )
 
         # First shard: embed + forward
         first_shard = self._shards[0]

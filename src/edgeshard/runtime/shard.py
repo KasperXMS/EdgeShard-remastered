@@ -101,7 +101,9 @@ class ModelShard:
         if session_id in self._sessions:
             raise SessionError(f"Session {session_id} already exists")
 
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # Get device from adapter to ensure consistency
+        device = self._adapter.get_device()
+
         kv_cache = self._adapter.init_kv_cache(
             batch_size=batch_size,
             max_seq_len=max_seq_len,

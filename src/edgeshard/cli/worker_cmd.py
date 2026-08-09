@@ -45,13 +45,13 @@ def start_worker(master_address: str, config_path: str) -> None:
     async def run() -> None:
         await worker.start()
         console.print("[dim]Worker is running. Press Ctrl+C to stop.[/dim]")
-        # Keep running
-        while True:
-            await asyncio.sleep(1)
+        try:
+            # Keep running
+            while True:
+                await asyncio.sleep(1)
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            console.print("\n[yellow]Shutting down Worker...[/yellow]")
+            await worker.stop()
+            console.print("[yellow]Worker stopped.[/yellow]")
 
-    try:
-        asyncio.run(run())
-    except KeyboardInterrupt:
-        console.print("\n[yellow]Shutting down Worker...[/yellow]")
-        asyncio.run(worker.stop())
-        console.print("[yellow]Worker stopped.[/yellow]")
+    asyncio.run(run())

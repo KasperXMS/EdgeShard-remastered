@@ -24,20 +24,27 @@ class TensorTransport(ABC):
         self,
         tensor: torch.Tensor,
         target_shard_id: str,
+        session_id: str = "",
     ) -> None:
         """Send a tensor to a target Shard.
 
         Args:
             tensor: Hidden states to send [batch, seq, hidden].
             target_shard_id: Identifier of the receiving Shard.
+            session_id: Session ID for routing (optional).
         """
 
     @abstractmethod
-    async def recv(self, source_shard_id: str) -> torch.Tensor:
+    async def recv(
+        self,
+        source_shard_id: str,
+        session_id: str = "",
+    ) -> torch.Tensor:
         """Receive a tensor from a source Shard.
 
         Args:
             source_shard_id: Identifier of the sending Shard.
+            session_id: Session ID for routing (optional).
 
         Returns:
             Received hidden states [batch, seq, hidden].

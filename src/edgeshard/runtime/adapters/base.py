@@ -90,3 +90,11 @@ class ModelAdapter(ABC):
     @abstractmethod
     def unload(self) -> None:
         """Release model weights and free memory."""
+
+    @abstractmethod
+    def get_device(self) -> torch.device:
+        """Return the device where model weights are loaded.
+
+        Returns:
+            torch.device: The device (CPU, CUDA, etc.)
+        """

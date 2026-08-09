@@ -43,11 +43,11 @@ def start_master(config_path: str) -> None:
     async def run() -> None:
         await server.start()
         console.print("[dim]Master is running. Press Ctrl+C to stop.[/dim]")
-        await server.wait_for_termination()
+        try:
+            await server.wait_for_termination()
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            console.print("\n[yellow]Shutting down Master...[/yellow]")
+            await server.stop()
+            console.print("[yellow]Master stopped.[/yellow]")
 
-    try:
-        asyncio.run(run())
-    except KeyboardInterrupt:
-        console.print("\n[yellow]Shutting down Master...[/yellow]")
-        asyncio.run(server.stop())
-        console.print("[yellow]Master stopped.[/yellow]")
+    asyncio.run(run())

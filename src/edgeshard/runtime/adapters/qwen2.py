@@ -38,7 +38,6 @@ class Qwen2Adapter(ModelAdapter):
         self._lm_head: nn.Linear | None = None
         self._norm: nn.Module | None = None
         self._config: dict[str, Any] = {}
-        self._rotary_emb: nn.Module | None = None
         self._device: torch.device = torch.device("cpu")
         self._dtype: torch.dtype = torch.float32
         self._layer_start: int = 0
@@ -53,18 +52,8 @@ class Qwen2Adapter(ModelAdapter):
         dtype: torch.dtype,
         device: torch.device,
     ) -> None:
-        """Load a subset of Qwen2 model layers.
-
-        Args:
-            model_path: Path to model directory or Hugging Face ID.
-            layer_start: Inclusive start layer index.
-            layer_end: Exclusive end layer index.
-            dtype: Target dtype for weights.
-            device: Target device.
-        """
-        logger.info(
-            f"Loading Qwen2 layers [{layer_start}, {layer_end}) from {model_path}"
-        )
+        """Load a subset of Qwen2 model layers."""
+        logger.info(f"Loading Qwen2 layers [{layer_start}, {layer_end}) from {model_path}")
 
         self._device = device
         self._dtype = dtype
@@ -81,32 +70,31 @@ class Qwen2Adapter(ModelAdapter):
 
         num_layers = self._config.get("num_hidden_layers", 0)
         if layer_end > num_layers:
-            raise ShardError(
-                f"layer_end {layer_end} exceeds num_layers {num_layers}"
-            )
+            raise ShardError(f"layer_end {layer_end} exceeds num_layers {num_layers}")
 
-        # Load model weights - handle both single and sharded checkpoints
-        state_dict = self._load_weights(Path(model_path), device)
+        # Load model weights to CPU first to avoid GPU memory bloat
+        state_dict = self._load_weights(Path(model_path), torch.device("cpu"))
 
-        # Filter weights for this shard's layer range
+        # Filter weights for this shard's layer range, then move to target device
         shard_weights = {}
         for key, value in state_dict.items():
             if "model.layers." in key:
-                # Extract layer index
                 layer_idx = int(key.split("model.layers.")[1].split(".")[0])
                 if layer_start <= layer_idx < layer_end:
-                    # Remap to 0-based for this shard
                     new_key = key.replace(
                         f"model.layers.{layer_idx}.",
                         f"model.layers.{layer_idx - layer_start}.",
                     )
-                    shard_weights[new_key] = value.to(dtype)
+                    shard_weights[new_key] = value.to(dtype=dtype, device=device)
             elif key == "model.embed_tokens.weight" and layer_start == 0:
-                shard_weights[key] = value.to(dtype)
+                shard_weights[key] = value.to(dtype=dtype, device=device)
             elif key == "model.norm.weight" and layer_end == num_layers:
-                shard_weights[key] = value.to(dtype)
+                shard_weights[key] = value.to(dtype=dtype, device=device)
             elif key == "lm_head.weight" and layer_end == num_layers:
-                shard_weights[key] = value.to(dtype)
+                shard_weights[key] = value.to(dtype=dtype, device=device)
+
+        # Free the full state dict from CPU memory
+        del state_dict
 
         # Build model components
         self._build_model(shard_weights, layer_start, layer_end, num_layers)
@@ -114,15 +102,7 @@ class Qwen2Adapter(ModelAdapter):
         logger.info(f"Loaded {len(self._layers)} layers on {device}")
 
     def _load_weights(self, model_path: Path, device: torch.device) -> dict[str, torch.Tensor]:
-        """Load weights from single or sharded checkpoint.
-
-        Args:
-            model_path: Path to model directory.
-            device: Target device.
-
-        Returns:
-            State dict with all model weights.
-        """
+        """Load weights from single or sharded checkpoint."""
         device_str = str(device)
 
         # Try single file first
@@ -138,7 +118,6 @@ class Qwen2Adapter(ModelAdapter):
             with open(index_file) as f:
                 index = json.load(f)
 
-            # Get unique shard files
             shard_files = set(index["weight_map"].values())
             state_dict = {}
 
@@ -170,16 +149,9 @@ class Qwen2Adapter(ModelAdapter):
             Qwen2DecoderLayer,
             Qwen2Config,
             Qwen2RMSNorm,
-            Qwen2RotaryEmbedding,
         )
 
         config = Qwen2Config(**self._config)
-        # Set attention implementation to avoid None issues
-        config._attn_implementation = "eager"
-
-        # Create rotary embedding (shared across all layers)
-        self._rotary_emb = Qwen2RotaryEmbedding(config)
-        self._rotary_emb = self._rotary_emb.to(self._device, self._dtype)
 
         # Embedding layer (only on first shard)
         if layer_start == 0 and "model.embed_tokens.weight" in weights:
@@ -199,12 +171,11 @@ class Qwen2Adapter(ModelAdapter):
                 for k, v in weights.items()
                 if k.startswith(f"model.layers.{i}.")
             }
-            # Use strict=True to catch loading errors
             missing, unexpected = layer.load_state_dict(layer_weights, strict=False)
             if missing:
-                logger.warning(f"Layer {i} missing keys: {missing}")
+                logger.warning(f"Layer {i} missing keys: {len(missing)} keys")
             if unexpected:
-                logger.warning(f"Layer {i} unexpected keys: {unexpected}")
+                logger.warning(f"Layer {i} unexpected keys: {len(unexpected)} keys")
 
             layer.to(self._device, self._dtype)
             layer.eval()
@@ -222,43 +193,109 @@ class Qwen2Adapter(ModelAdapter):
             self._lm_head.weight.data = weights["lm_head.weight"]
             self._lm_head.to(self._device, self._dtype)
 
+    def _apply_rotary_pos_emb(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Apply rotary position embeddings to query and key tensors.
+
+        Args:
+            q: Query tensor [batch, num_heads, seq_len, head_dim]
+            k: Key tensor [batch, num_kv_heads, seq_len, head_dim]
+            cos: Cosine embeddings [seq_len, head_dim] or [1, 1, seq_len, head_dim]
+            sin: Sine embeddings [seq_len, head_dim] or [1, 1, seq_len, head_dim]
+
+        Returns:
+            Tuple of (rotated_q, rotated_k)
+        """
+        # Ensure cos/sin have correct shape for broadcasting
+        if cos.dim() == 2:
+            cos = cos.unsqueeze(0).unsqueeze(0)  # [1, 1, seq, head_dim]
+            sin = sin.unsqueeze(0).unsqueeze(0)
+
+        def rotate_half(x):
+            x1, x2 = x.chunk(2, dim=-1)
+            return torch.cat((-x2, x1), dim=-1)
+
+        q_embed = (q * cos) + (rotate_half(q) * sin)
+        k_embed = (k * cos) + (rotate_half(k) * sin)
+
+        return q_embed, k_embed
+
+    def _compute_rotary_embeddings(
+        self,
+        position_ids: torch.Tensor,
+        seq_len: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Compute rotary position embeddings (cos, sin) for the given position_ids.
+
+        Args:
+            position_ids: Position IDs [batch, seq_len]
+            seq_len: Sequence length.
+
+        Returns:
+            Tuple of (cos, sin) tensors.
+        """
+        from transformers.models.qwen2.modeling_qwen2 import Qwen2RotaryEmbedding
+
+        config = Qwen2Config(**self._config)
+        head_dim = config.hidden_size // config.num_attention_heads
+
+        # Create rotary embedding
+        rotary_emb = Qwen2RotaryEmbedding(
+            dim=head_dim,
+            max_position_embeddings=config.max_position_embeddings,
+            base=config.rope_theta,
+        )
+        rotary_emb = rotary_emb.to(self._device, self._dtype)
+
+        # Compute embeddings
+        value = rotary_emb(rotary_emb.inv_freq, position_ids)
+        cos = value[0]  # [seq_len, head_dim]
+        sin = value[1]  # [seq_len, head_dim]
+
+        return cos, sin
+
     def forward(
         self,
         hidden_states: torch.Tensor,
         kv_cache: list[tuple[torch.Tensor, torch.Tensor]],
         position_ids: torch.Tensor,
     ) -> tuple[torch.Tensor, list[tuple[torch.Tensor, torch.Tensor]]]:
-        """Run forward pass through loaded layers.
-
-        Args:
-            hidden_states: Input hidden states [batch, seq, hidden].
-            kv_cache: List of (key, value) tuples per layer.
-            position_ids: Position IDs for RoPE [batch, seq].
-
-        Returns:
-            (output_hidden_states, updated_kv_cache)
-        """
+        """Run forward pass through loaded layers."""
         if not self._loaded:
             raise ShardError("Model not loaded")
 
-        # Compute RoPE embeddings (required for newer transformers versions)
-        position_embeddings = self._compute_position_embeddings(hidden_states, position_ids)
+        # Compute rotary embeddings once for all layers
+        seq_len = hidden_states.shape[1]
+        cos, sin = self._compute_rotary_embeddings(position_ids, seq_len)
+        position_embeddings = (cos, sin)
 
         new_kv_cache = []
+
         for i, layer in enumerate(self._layers):
             # Get KV cache for this layer
             layer_kv = kv_cache[i] if i < len(kv_cache) else None
 
-            # Run layer
-            outputs = layer(
-                hidden_states,
-                past_key_value=layer_kv,
-                position_ids=position_ids,
-                position_embeddings=position_embeddings,
-                use_cache=True,
-            )
-            hidden_states = outputs[0]
-            new_kv = outputs[1] if len(outputs) > 1 else None
+            # Call the layer with the standard API for transformers 4.44.0
+            try:
+                outputs = layer(
+                    hidden_states,
+                    attention_mask=None,
+                    position_ids=position_ids,
+                    past_key_value=layer_kv,
+                    use_cache=True,
+                    position_embeddings=position_embeddings,
+                )
+                hidden_states = outputs[0]
+                new_kv = outputs[1] if len(outputs) > 1 else None
+            except Exception as e:
+                logger.error(f"Layer {i} forward failed: {e}")
+                raise
+
             new_kv_cache.append(new_kv)
 
         # Apply final norm if this is the last shard
@@ -267,47 +304,14 @@ class Qwen2Adapter(ModelAdapter):
 
         return hidden_states, new_kv_cache
 
-    def _compute_position_embeddings(
-        self, hidden_states: torch.Tensor, position_ids: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Compute RoPE position embeddings (cos, sin).
-
-        Args:
-            hidden_states: Hidden states [batch, seq, hidden] - needed for device/shape.
-            position_ids: Position IDs [batch, seq].
-
-        Returns:
-            Tuple of (cos, sin) tensors.
-        """
-        if self._rotary_emb is None:
-            raise ShardError("Rotary embedding not initialized")
-
-        # Compute cos and sin
-        position_embeddings = self._rotary_emb(hidden_states, position_ids)
-        return position_embeddings
-
     def embed(self, input_ids: torch.Tensor) -> torch.Tensor:
-        """Convert token IDs to embeddings.
-
-        Args:
-            input_ids: Token IDs [batch, seq].
-
-        Returns:
-            Embeddings [batch, seq, hidden].
-        """
+        """Convert token IDs to embeddings."""
         if self._embed_tokens is None:
             raise ShardError("This shard does not have embedding layer")
         return self._embed_tokens(input_ids)
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        """Compute logits from hidden states.
-
-        Args:
-            hidden_states: Hidden states [batch, seq, hidden].
-
-        Returns:
-            Logits [batch, seq, vocab].
-        """
+        """Compute logits from hidden states."""
         if self._lm_head is None:
             raise ShardError("This shard does not have LM head")
         return self._lm_head(hidden_states)
@@ -318,27 +322,27 @@ class Qwen2Adapter(ModelAdapter):
         max_seq_len: int,
         device: torch.device,
     ) -> list[tuple[torch.Tensor, torch.Tensor]]:
-        """Initialize empty KV cache for Qwen2.
-
-        Returns:
-            List of (key, value) tuples, one per layer. Each is None initially.
-        """
-        # Qwen2 uses dynamic cache, so we start with None for each layer
+        """Initialize empty KV cache for Qwen2."""
         return [None] * len(self._layers)
 
     def get_model_info(self) -> dict[str, Any]:
         """Return Qwen2 model metadata."""
+        hidden_size = self._config.get("hidden_size", 0)
+        num_attention_heads = self._config.get("num_attention_heads", 0)
+        # head_dim might not be in config, compute it if missing
+        head_dim = self._config.get("head_dim", 0)
+        if head_dim == 0 and hidden_size > 0 and num_attention_heads > 0:
+            head_dim = hidden_size // num_attention_heads
+
         return {
             "model_type": "qwen2",
             "num_layers": self._config.get("num_hidden_layers", 0),
-            "hidden_size": self._config.get("hidden_size", 0),
-            "num_attention_heads": self._config.get("num_attention_heads", 0),
+            "hidden_size": hidden_size,
+            "num_attention_heads": num_attention_heads,
             "num_key_value_heads": self._config.get("num_key_value_heads", 0),
-            "head_dim": self._config.get("head_dim", 0),
+            "head_dim": head_dim,
             "vocab_size": self._config.get("vocab_size", 0),
-            "max_position_embeddings": self._config.get(
-                "max_position_embeddings", 0
-            ),
+            "max_position_embeddings": self._config.get("max_position_embeddings", 0),
             "loaded_layers": len(self._layers),
             "has_embedding": self._embed_tokens is not None,
             "has_lm_head": self._lm_head is not None,
@@ -350,9 +354,12 @@ class Qwen2Adapter(ModelAdapter):
         self._embed_tokens = None
         self._lm_head = None
         self._norm = None
-        self._rotary_emb = None
         self._config.clear()
         self._loaded = False
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         logger.info("Qwen2 adapter unloaded")
+
+    def get_device(self) -> torch.device:
+        """Return the device where model weights are loaded."""
+        return self._device

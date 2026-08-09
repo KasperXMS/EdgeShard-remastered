@@ -61,12 +61,12 @@ def start_shard(
     async def run() -> None:
         await daemon.start()
         console.print("[dim]Shard is running. Press Ctrl+C to stop.[/dim]")
-        while True:
-            await asyncio.sleep(1)
+        try:
+            while True:
+                await asyncio.sleep(1)
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            console.print("\n[yellow]Shutting down shard...[/yellow]")
+            await daemon.stop()
+            console.print("[yellow]Shard stopped.[/yellow]")
 
-    try:
-        asyncio.run(run())
-    except KeyboardInterrupt:
-        console.print("\n[yellow]Shutting down shard...[/yellow]")
-        asyncio.run(daemon.stop())
-        console.print("[yellow]Shard stopped.[/yellow]")
+    asyncio.run(run())
