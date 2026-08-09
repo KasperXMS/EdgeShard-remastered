@@ -174,6 +174,8 @@ class Qwen2Adapter(ModelAdapter):
         )
 
         config = Qwen2Config(**self._config)
+        # Set attention implementation to avoid None issues
+        config._attn_implementation = "eager"
 
         # Create rotary embedding (shared across all layers)
         self._rotary_emb = Qwen2RotaryEmbedding(config)
