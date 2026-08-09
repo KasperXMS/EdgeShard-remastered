@@ -13,6 +13,36 @@ message DeviceInfo {
   int32 total_memory_mb = 4;
   string compute_capability = 5;
   map<string, string> properties = 6;
+  GpuMetrics gpu_metrics = 7;  // Dynamic GPU metrics (if applicable)
+}
+
+// Dynamic GPU metrics (NVML)
+message GpuMetrics {
+  int32 utilization_percent = 1;      // GPU compute utilization 0-100
+  int32 memory_utilization_percent = 2; // Memory controller utilization 0-100
+  int32 temperature_c = 3;            // Temperature in Celsius
+  int32 power_draw_mw = 4;            // Current power draw in milliwatts
+  int32 power_limit_mw = 5;           // Power limit in milliwatts
+  int64 free_memory_mb = 6;           // Current free memory in MB
+}
+
+// Dynamic CPU metrics
+message CpuMetrics {
+  float utilization_percent = 1;      // CPU utilization 0-100
+  int64 used_memory_mb = 2;           // Currently used system memory
+}
+
+// Per-device dynamic metrics
+message DeviceMetrics {
+  string device_id = 1;
+  GpuMetrics gpu_metrics = 2;  // For GPU devices
+  CpuMetrics cpu_metrics = 3;  // For CPU devices
+}
+
+// Network metrics between workers
+message NetworkMetrics {
+  map<string, int32> latency_ms_to_worker = 1;  // worker_id -> latency_ms
+  int64 estimated_bandwidth_mbps = 2;           // Estimated bandwidth
 }
 
 message WorkerState {
@@ -24,6 +54,8 @@ message WorkerState {
   string status = 6;  // "online", "offline", "busy"
   map<string, string> metadata = 7;
   int64 last_heartbeat = 8;  // Unix timestamp
+  repeated DeviceMetrics device_metrics = 9;  // Dynamic device metrics
+  NetworkMetrics network_metrics = 10;        // Network metrics
 }
 
 // ===========================================================================
@@ -50,6 +82,8 @@ message HeartbeatRequest {
   int32 available_memory_mb = 2;
   string status = 3;
   map<string, string> metadata = 4;
+  repeated DeviceMetrics device_metrics = 5;  // Dynamic device metrics
+  NetworkMetrics network_metrics = 6;         // Network metrics
 }
 
 message HeartbeatResponse {

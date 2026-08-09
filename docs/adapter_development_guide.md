@@ -346,6 +346,8 @@ output = decoder.generate("The capital of France is", max_new_tokens=10)
 | "LM head not found" | 未处理tied embeddings | 检查tie_word_embeddings标志 |
 | CUDA OOM | 权重直接加载到GPU | 先加载到CPU，过滤后再移动 |
 | 设备不匹配 | 张量在不同设备上 | 使用`get_device()`确保一致性 |
+| `Can't call numpy() on Tensor that requires grad` | 序列化时tensor带梯度 | 用`.detach().cpu().numpy()` |
+| `coroutine 'Channel.close' was never awaited` | gRPC异步channel未await close | 用`await channel.close()` |
 
 ---
 

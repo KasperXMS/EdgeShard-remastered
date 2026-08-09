@@ -123,6 +123,21 @@ def node_list(
     list_nodes(master_address=master)
 
 
+@node_app.command("metrics")
+def node_metrics(
+    master: str = typer.Option(
+        "localhost:10500",
+        "--master",
+        "-m",
+        help="Master address (host:port).",
+    ),
+) -> None:
+    """Show detailed metrics for all workers (GPU utilization, temperature, power, network)."""
+    from edgeshard.cli.node_cmd import show_metrics
+
+    show_metrics(master_address=master)
+
+
 # ---------------------------------------------------------------------------
 # Profile commands
 # ---------------------------------------------------------------------------

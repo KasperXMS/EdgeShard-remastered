@@ -135,7 +135,7 @@ See [EdgeShard_v2_Technical_Architecture_Design_v0.2.md](./EdgeShard_v2_Technica
 
 ## Implementation Status
 
-### ✅ Implemented (M0–M4)
+### ✅ Implemented (M0–M5)
 
 #### M0: Package + CLI Skeleton
 - [x] Python package with `pip install -e .` support
@@ -178,13 +178,16 @@ See [EdgeShard_v2_Technical_Architecture_Design_v0.2.md](./EdgeShard_v2_Technica
 - [x] ShardDaemon for standalone shard processes
 - [x] CLI commands: `edgeshard shard start`, `edgeshard infer`
 
-### 🚧 Not Yet Implemented (M5–M10)
-
 #### M5: Resource Discovery Enhancement
-- [ ] Detailed hardware metrics (GPU utilization, temperature, power)
-- [ ] Network topology discovery
-- [ ] Bandwidth and latency estimation between nodes
-- [ ] Jetson device profiling (tegrastats integration)
+- [x] Detailed GPU metrics (utilization, temperature, power)
+- [x] CPU metrics (utilization, memory usage)
+- [x] Network topology discovery (latency measurement)
+- [x] Bandwidth estimation
+- [x] Jetson device profiling (tegrastats integration)
+- [x] Enhanced heartbeat with dynamic metrics
+- [x] CLI command: `edgeshard node metrics`
+
+### 🚧 Not Yet Implemented (M6–M10)
 
 #### M6: Automatic Profiling
 - [ ] Profile executor on Worker

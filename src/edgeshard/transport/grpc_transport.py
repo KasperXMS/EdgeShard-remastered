@@ -236,7 +236,7 @@ class GrpcTensorTransport(TensorTransport):
     async def close(self) -> None:
         """Close all gRPC channels."""
         for channel in self._channels.values():
-            channel.close()
+            await channel.close()
         self._channels.clear()
         self._stubs.clear()
         logger.info(f"Transport {self._shard_id} closed")

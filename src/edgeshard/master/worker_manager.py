@@ -4,11 +4,13 @@ The WorkerManager maintains:
 - Registry of active Workers
 - Last heartbeat timestamps
 - Hardware and resource information
+- Dynamic metrics (GPU utilization, temperature, power)
+- Network topology information
 - Health status
 
 It provides methods for:
 - Registering/unregistering Workers
-- Updating heartbeat state
+- Updating heartbeat state and metrics
 - Querying cluster state
 """
 
@@ -37,22 +39,59 @@ class WorkerRecord:
     last_heartbeat: float = 0.0
     metadata: dict[str, str] = field(default_factory=dict)
 
+    # M5: Dynamic metrics
+    device_metrics: list[edgeshard_pb2.DeviceMetrics] = field(default_factory=list)
+    network_metrics: edgeshard_pb2.NetworkMetrics | None = None
+    last_metrics_update: float = 0.0
+
     def is_alive(self, timeout_seconds: float = 30.0) -> bool:
         """Check if Worker is alive based on last heartbeat."""
         return (time.time() - self.last_heartbeat) < timeout_seconds
 
     def to_proto(self) -> edgeshard_pb2.WorkerState:
         """Convert to protobuf WorkerState message."""
-        return edgeshard_pb2.WorkerState(
+        state = edgeshard_pb2.WorkerState(
             worker_id=str(self.worker_id),
             hostname=self.hostname,
-            devices=self.devices,
             available_memory_mb=self.available_memory_mb,
             cpu_count=self.cpu_count,
             status=self.status,
             metadata=self.metadata,
             last_heartbeat=int(self.last_heartbeat),
         )
+
+        # Add devices
+        for device in self.devices:
+            state.devices.append(device)
+
+        # Add dynamic metrics
+        for dm in self.device_metrics:
+            state.device_metrics.append(dm)
+
+        # Add network metrics
+        if self.network_metrics:
+            state.network_metrics.CopyFrom(self.network_metrics)
+
+        return state
+
+    def get_gpu_summary(self) -> dict[str, Any]:
+        """Get a summary of GPU metrics for display.
+
+        Returns:
+            Dict with GPU utilization, temperature, power info.
+        """
+        summary = {}
+        for dm in self.device_metrics:
+            if dm.HasField("gpu_metrics"):
+                gpu_metrics = dm.gpu_metrics
+                summary[dm.device_id] = {
+                    "utilization_percent": gpu_metrics.utilization_percent,
+                    "temperature_c": gpu_metrics.temperature_c,
+                    "power_draw_w": gpu_metrics.power_draw_mw / 1000,
+                    "power_limit_w": gpu_metrics.power_limit_mw / 1000,
+                    "free_memory_mb": gpu_metrics.free_memory_mb,
+                }
+        return summary
 
 
 class WorkerManager:
@@ -126,14 +165,18 @@ class WorkerManager:
         available_memory_mb: int,
         status: str,
         metadata: dict[str, str] | None = None,
+        device_metrics: list[edgeshard_pb2.DeviceMetrics] | None = None,
+        network_metrics: edgeshard_pb2.NetworkMetrics | None = None,
     ) -> bool:
-        """Update Worker heartbeat and status.
+        """Update Worker heartbeat, status, and metrics.
 
         Args:
             worker_id: Worker identifier.
             available_memory_mb: Current available memory.
             status: Worker status ("online", "busy", etc.).
             metadata: Optional metadata updates.
+            device_metrics: Dynamic device metrics (GPU, CPU).
+            network_metrics: Network topology metrics.
 
         Returns:
             True if heartbeat was accepted.
@@ -149,6 +192,14 @@ class WorkerManager:
 
         if metadata:
             worker.metadata.update(metadata)
+
+        # Update dynamic metrics
+        if device_metrics:
+            worker.device_metrics = list(device_metrics)
+            worker.last_metrics_update = time.time()
+
+        if network_metrics:
+            worker.network_metrics = network_metrics
 
         return True
 
@@ -192,9 +243,17 @@ class WorkerManager:
         total_memory_mb = sum(w.available_memory_mb for w in alive_workers)
         total_devices = sum(len(w.devices) for w in alive_workers)
 
+        # Count GPUs with high utilization
+        busy_gpus = 0
+        for worker in alive_workers:
+            for dm in worker.device_metrics:
+                if dm.HasField("gpu_metrics") and dm.gpu_metrics.utilization_percent > 50:
+                    busy_gpus += 1
+
         return {
             "num_workers": len(alive_workers),
             "total_memory_mb": total_memory_mb,
             "total_devices": total_devices,
+            "busy_gpus": busy_gpus,
             "workers": [w.to_proto() for w in alive_workers],
         }

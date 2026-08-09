@@ -71,6 +71,8 @@ class EdgeShardMasterServicer(edgeshard_pb2_grpc.WorkerServiceServicer):
             available_memory_mb=request.available_memory_mb,
             status=request.status,
             metadata=dict(request.metadata),
+            device_metrics=list(request.device_metrics),
+            network_metrics=request.network_metrics if request.HasField("network_metrics") else None,
         )
 
         if success:

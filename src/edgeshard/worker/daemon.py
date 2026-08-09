@@ -3,7 +3,7 @@
 The Worker daemon:
 1. Probes local hardware
 2. Registers with Master via gRPC
-3. Sends periodic heartbeats
+3. Sends periodic heartbeats (including dynamic metrics)
 4. Manages local model cache
 5. Executes deployment commands from Master
 6. Hosts Shard runtime instances
@@ -24,11 +24,13 @@ from edgeshard._grpc import edgeshard_pb2, edgeshard_pb2_grpc
 from edgeshard.common.config import WorkerConfig
 from edgeshard.common.logging import get_logger, setup_logging
 from edgeshard.worker.hardware_probe import (
+    collect_all_device_metrics,
     get_available_memory_mb,
     get_cpu_count,
     get_hostname,
     probe_hardware,
 )
+from edgeshard.worker.network_probe import NetworkProbe
 
 logger = get_logger(__name__)
 
@@ -45,6 +47,8 @@ class WorkerDaemon:
         self._stub: edgeshard_pb2_grpc.WorkerServiceStub | None = None
         self._running = False
         self._heartbeat_task: asyncio.Task | None = None
+        self._network_probe = NetworkProbe(self._worker_id)
+        self._known_workers: dict[str, tuple[str, int]] = {}  # worker_id -> (host, port)
 
     @property
     def worker_id(self) -> str:
@@ -64,6 +68,9 @@ class WorkerDaemon:
 
         # Register with Master
         await self._register()
+
+        # Discover other workers and measure network topology
+        await self._discover_workers()
 
         # Start heartbeat loop
         self._running = True
@@ -131,6 +138,37 @@ class WorkerDaemon:
         except grpc.RpcError as e:
             logger.warning(f"Unregister RPC error: {e}")
 
+    async def _discover_workers(self) -> None:
+        """Discover other workers and measure network latency."""
+        if not self._stub:
+            return
+
+        try:
+            # Get list of all workers
+            request = edgeshard_pb2.ListWorkersRequest()
+            response = await self._stub.ListWorkers(request)
+
+            for worker in response.workers:
+                if worker.worker_id == self._worker_id:
+                    continue  # Skip self
+
+                # Store known worker (use hostname:10500 as default port for probing)
+                # In practice, we'd need a separate data port for tensor transfer
+                self._known_workers[worker.worker_id] = (worker.hostname, 10500)
+
+            # Measure latency to known workers
+            if self._known_workers:
+                logger.info(f"Discovering network topology to {len(self._known_workers)} worker(s)...")
+                await self._network_probe.measure_latency_to_workers(self._known_workers)
+
+                # Estimate bandwidth
+                for worker_id, (host, port) in self._known_workers.items():
+                    self._network_probe.estimate_bandwidth(host, port, worker_id)
+                    break  # Just need one estimate
+
+        except grpc.RpcError as e:
+            logger.warning(f"Failed to discover workers: {e}")
+
     async def _heartbeat_loop(self) -> None:
         """Send periodic heartbeats to Master."""
         interval = self._config.registration.heartbeat_interval_seconds
@@ -144,12 +182,26 @@ class WorkerDaemon:
             await asyncio.sleep(interval)
 
     async def _send_heartbeat(self) -> None:
-        """Send a single heartbeat to Master."""
+        """Send a single heartbeat to Master with dynamic metrics."""
+        # Collect device metrics
+        device_metrics = collect_all_device_metrics(self._devices)
+
+        # Get network metrics
+        network_metrics = self._network_probe.get_network_metrics()
+
         request = edgeshard_pb2.HeartbeatRequest(
             worker_id=self._worker_id,
             available_memory_mb=get_available_memory_mb(),
             status="online",
         )
+
+        # Add device metrics
+        for dm in device_metrics:
+            request.device_metrics.append(dm)
+
+        # Add network metrics if available
+        if network_metrics.latency_ms_to_worker or network_metrics.estimated_bandwidth_mbps:
+            request.network_metrics.CopyFrom(network_metrics)
 
         try:
             response = await self._stub.Heartbeat(request)

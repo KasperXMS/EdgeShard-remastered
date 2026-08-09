@@ -25,17 +25,19 @@ await stub.SendTensor(request)  # OK
 
 **解决**:
 ```python
-# 序列化时：bfloat16先转float32
+# 序列化时：先detach()移除梯度图，再处理bfloat16
 if tensor.dtype == torch.bfloat16:
-    data = tensor.cpu().to(torch.float32).numpy().tobytes()
+    data = tensor.detach().cpu().to(torch.float32).numpy().tobytes()
 else:
-    data = tensor.cpu().numpy().tobytes()
+    data = tensor.detach().cpu().numpy().tobytes()
 
 # 反序列化时：转回bfloat16
 if dtype == torch.bfloat16:
     array = np.frombuffer(data, dtype=np.float32).reshape(shape)
     tensor = torch.from_numpy(array.copy()).to(dtype=dtype, device=device)
 ```
+
+**注意**: 必须用`.detach()`，因为模型forward可能返回带梯度的tensor，直接调`.numpy()`会报`RuntimeError: Can't call numpy() on Tensor that requires grad`。
 
 ## 3. 单Shard Pipeline双重调用
 
