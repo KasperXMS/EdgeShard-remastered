@@ -320,9 +320,40 @@ class Qwen2Adapter(ModelAdapter):
         cos, sin = self._compute_rotary_embeddings(position_ids, seq_len)
         position_embeddings = (cos, sin)
 
+        # Compute cache_position for correct attention masking with KV cache
+        # cache_position tells the layer where in the sequence the current tokens are
+        if hasattr(kv_cache, 'get_seq_length') and kv_cache.get_seq_length() > 0:
+            # Decode phase: we have cached tokens
+            cached_len = kv_cache.get_seq_length()
+            cache_position = torch.arange(
+                cached_len, cached_len + seq_len,
+                device=hidden_states.device,
+            )
+        else:
+            # Prefill phase: no cache yet
+            cache_position = torch.arange(seq_len, device=hidden_states.device)
+
+        # Build attention mask for causal attention
+        # When using KV cache, we need a 1D mask of shape [batch, 1, target_len, source_len]
+        # where target_len = seq_len (current input) and source_len = cached_len + seq_len
+        if hasattr(kv_cache, 'get_seq_length') and kv_cache.get_seq_length() > 0:
+            cached_len = kv_cache.get_seq_length()
+            target_len = seq_len
+            source_len = cached_len + seq_len
+            # Causal mask: each position can attend to all cached + current up to itself
+            causal_mask = torch.triu(
+                torch.full((target_len, source_len), float('-inf'), device=hidden_states.device),
+                diagonal=cached_len + 1,
+            )
+            attention_mask = causal_mask.unsqueeze(0).unsqueeze(0)  # [1, 1, target_len, source_len]
+        else:
+            attention_mask = None
+
         logger.debug(
             f"Forward: hidden_states={hidden_states.shape}, "
-            f"position_ids={position_ids}, kv_cache_type={type(kv_cache).__name__}"
+            f"position_ids={position_ids}, cache_position={cache_position}, "
+            f"kv_cache_type={type(kv_cache).__name__}, "
+            f"kv_cache_seq_len={kv_cache.get_seq_length() if hasattr(kv_cache, 'get_seq_length') else 'N/A'}"
         )
 
         for i, layer in enumerate(self._layers):
@@ -331,20 +362,17 @@ class Qwen2Adapter(ModelAdapter):
             try:
                 outputs = layer(
                     hidden_states,
-                    attention_mask=None,
+                    attention_mask=attention_mask,
                     position_ids=position_ids,
                     past_key_value=kv_cache,
                     use_cache=True,
                     position_embeddings=position_embeddings,
+                    cache_position=cache_position,
                 )
                 hidden_states = outputs[0]
             except Exception as e:
                 logger.error(f"Layer {i} forward failed: {e}")
                 raise
-
-        # Log KV cache state after forward
-        if hasattr(kv_cache, 'get_seq_length'):
-            logger.debug(f"KV cache seq_length after forward: {kv_cache.get_seq_length()}")
 
         # Apply final norm if this is the last shard
         if self._norm is not None:
