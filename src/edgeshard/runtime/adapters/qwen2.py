@@ -224,20 +224,13 @@ class Qwen2Adapter(ModelAdapter):
             Tuple of (cos, sin) tensors.
         """
         from transformers.models.qwen2.modeling_qwen2 import Qwen2RotaryEmbedding
+        from transformers.models.qwen2.configuration_qwen2 import Qwen2Config
 
-        # Get config values
-        hidden_size = self._config.get("hidden_size", 0)
-        num_heads = self._config.get("num_attention_heads", 0)
-        head_dim = hidden_size // num_heads
-        max_position_embeddings = self._config.get("max_position_embeddings", 2048)
-        rope_theta = self._config.get("rope_theta", 10000.0)
+        # Create config object
+        config = Qwen2Config(**self._config)
 
-        # Create rotary embedding
-        rot_emb = Qwen2RotaryEmbedding(
-            dim=head_dim,
-            max_position_embeddings=max_position_embeddings,
-            base=rope_theta,
-        )
+        # Create rotary embedding from config
+        rot_emb = Qwen2RotaryEmbedding(config)
         rot_emb = rot_emb.to(self._device, self._dtype)
 
         # Compute cos and sin
