@@ -186,6 +186,9 @@ message ProfileResponse {
   float kv_cache_per_token_mb = 4;
   float prefill_tokens_per_sec = 5;
   float decode_tokens_per_sec = 6;
+  int32 num_layers_profiled = 7;
+  float total_model_memory_mb = 8;
+  string device_name = 9;
 }
 
 // ===========================================================================

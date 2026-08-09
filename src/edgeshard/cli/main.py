@@ -154,11 +154,29 @@ def profile_run(
         "-d",
         help="Target device for profiling (auto, cuda:0, cpu, etc.).",
     ),
+    dtype: str = typer.Option(
+        "float16",
+        "--dtype",
+        help="Weight dtype (float16, bfloat16, float32).",
+    ),
 ) -> None:
     """Profile a model on local hardware to estimate performance."""
     from edgeshard.cli.profile_cmd import run_profile
 
-    run_profile(model_name=model, device=device)
+    # Handle "auto" device
+    if device == "auto":
+        import torch
+        device = "cuda:0" if torch.cuda.is_available() else "cpu"
+
+    run_profile(model_name=model, device=device, dtype=dtype)
+
+
+@profile_app.command("list")
+def profile_list() -> None:
+    """List all stored profiling results."""
+    from edgeshard.cli.profile_cmd import list_profiles
+
+    list_profiles()
 
 
 # ---------------------------------------------------------------------------

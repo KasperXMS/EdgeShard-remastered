@@ -179,13 +179,53 @@ class EdgeShardMasterServicer(edgeshard_pb2_grpc.WorkerServiceServicer):
         request: edgeshard_pb2.ProfileRequest,
         context: grpc.ServicerContext,
     ) -> edgeshard_pb2.ProfileResponse:
-        """Run profiling (placeholder for M6)."""
-        logger.info(f"Profile request for {request.model_name}")
-        # TODO (M6): Implement profiling
-        return edgeshard_pb2.ProfileResponse(
-            success=False,
-            message="Profiling not yet implemented (M6)",
-        )
+        """Run profiling on a model."""
+        logger.info(f"Profile request for {request.model_name} on {request.device}")
+
+        try:
+            import torch
+            from edgeshard.profiler.executor import ProfileExecutor
+            from edgeshard.profiler.store import ProfileStore
+
+            # Parse dtype
+            dtype_map = {
+                "float16": torch.float16,
+                "bfloat16": torch.bfloat16,
+                "float32": torch.float32,
+            }
+            torch_dtype = dtype_map.get(request.dtype, torch.float16)
+            torch_device = torch.device(request.device)
+
+            # Run profiling
+            executor = ProfileExecutor()
+            result = await executor.profile(
+                model_path=request.model_name,
+                dtype=torch_dtype,
+                device=torch_device,
+            )
+
+            # Save to store
+            store = ProfileStore()
+            store.save(result)
+
+            return edgeshard_pb2.ProfileResponse(
+                success=True,
+                message="Profiling complete",
+                layer_forward_ms=result.layer_forward_ms,
+                kv_cache_per_token_mb=result.kv_cache_per_token_mb,
+                prefill_tokens_per_sec=result.prefill_tokens_per_sec,
+                decode_tokens_per_sec=result.decode_tokens_per_sec,
+                num_layers_profiled=result.num_layers_profiled,
+                total_model_memory_mb=result.total_model_memory_mb,
+                device_name=result.device_name,
+            )
+
+        except Exception as e:
+            logger.error(f"Profiling failed: {e}")
+            return edgeshard_pb2.ProfileResponse(
+                success=False,
+                message=f"Profiling failed: {e}",
+            )
 
 
 class MasterServer:

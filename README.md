@@ -135,7 +135,7 @@ See [EdgeShard_v2_Technical_Architecture_Design_v0.2.md](./EdgeShard_v2_Technica
 
 ## Implementation Status
 
-### ✅ Implemented (M0–M5)
+### ✅ Implemented (M0–M6)
 
 #### M0: Package + CLI Skeleton
 - [x] Python package with `pip install -e .` support
@@ -187,15 +187,16 @@ See [EdgeShard_v2_Technical_Architecture_Design_v0.2.md](./EdgeShard_v2_Technica
 - [x] Enhanced heartbeat with dynamic metrics
 - [x] CLI command: `edgeshard node metrics`
 
-### 🚧 Not Yet Implemented (M6–M10)
-
 #### M6: Automatic Profiling
-- [ ] Profile executor on Worker
-- [ ] Forward pass latency measurement
-- [ ] KV cache memory cost estimation
-- [ ] Prefill/decode throughput measurement
-- [ ] Profile storage (SQLite)
-- [ ] Profile-driven scheduling hints
+- [x] Profile executor for measuring model performance
+- [x] Layer forward pass latency measurement
+- [x] KV cache memory cost estimation per token
+- [x] Prefill/decode throughput measurement
+- [x] Profile storage (SQLite)
+- [x] CLI commands: `edgeshard profile run`, `edgeshard profile list`
+- [x] Master Profile RPC integration
+
+### 🚧 Not Yet Implemented (M7–M10)
 
 #### M7: Scheduler and Placement
 - [ ] ClusterSnapshot and ProfileSnapshot data models
