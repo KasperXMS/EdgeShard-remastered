@@ -239,7 +239,10 @@ class Qwen2Adapter(ModelAdapter):
         Returns:
             Tuple of (cos, sin) tensors.
         """
-        from transformers.models.qwen2.modeling_qwen2 import Qwen2RotaryEmbedding
+        from transformers.models.qwen2.modeling_qwen2 import (
+            Qwen2Config,
+            Qwen2RotaryEmbedding,
+        )
 
         config = Qwen2Config(**self._config)
         head_dim = config.hidden_size // config.num_attention_heads
