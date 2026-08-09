@@ -63,7 +63,7 @@ class WorkerDaemon:
         master_address = self._config.registration.master_address
         logger.info(f"Connecting to Master at {master_address}")
 
-        self._channel = grpc.insecure_channel(master_address)
+        self._channel = grpc.aio.insecure_channel(master_address)
         self._stub = edgeshard_pb2_grpc.WorkerServiceStub(self._channel)
 
         # Register with Master
@@ -95,7 +95,7 @@ class WorkerDaemon:
             await self._unregister()
 
         if self._channel:
-            self._channel.close()
+            await self._channel.close()
 
         logger.info("Worker stopped")
 
