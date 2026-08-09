@@ -91,15 +91,17 @@ class Qwen2Adapter(ModelAdapter):
                     shard_weights[new_key] = value.to(dtype=dtype, device=device)
             else:
                 non_layer_keys.append(key)
-                if key == "model.embed_tokens.weight" and layer_start == 0:
-                    shard_weights[key] = value.to(dtype=dtype, device=device)
+                if key == "model.embed_tokens.weight":
+                    # Load embed_tokens if this is the first shard OR if embeddings are tied
+                    tie_word_embeddings = self._config.get("tie_word_embeddings", False)
+                    if layer_start == 0 or (layer_end == num_layers and tie_word_embeddings):
+                        shard_weights[key] = value.to(dtype=dtype, device=device)
                 elif key == "model.norm.weight" and layer_end == num_layers:
                     shard_weights[key] = value.to(dtype=dtype, device=device)
                 elif key == "lm_head.weight" and layer_end == num_layers:
                     shard_weights[key] = value.to(dtype=dtype, device=device)
 
         logger.info(f"Non-layer weight keys in checkpoint: {non_layer_keys}")
-        logger.info(f"Shard weights keys: {list(shard_weights.keys())}")
 
         # Free the full state dict from CPU memory
         del state_dict
@@ -197,13 +199,24 @@ class Qwen2Adapter(ModelAdapter):
             logger.debug(f"Loaded final norm (layer_end={layer_end}, num_layers={num_layers})")
 
         # LM head (only on last shard)
-        if layer_end == num_layers and "lm_head.weight" in weights:
-            self._lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
-            self._lm_head.weight.data = weights["lm_head.weight"]
-            self._lm_head.to(self._device, self._dtype)
-            logger.debug(f"Loaded LM head (layer_end={layer_end}, num_layers={num_layers})")
-        elif layer_end == num_layers:
-            logger.warning(f"LM head not found in weights for last shard (layer_end={layer_end}, num_layers={num_layers})")
+        # Check if word embeddings are tied
+        tie_word_embeddings = self._config.get("tie_word_embeddings", False)
+
+        if layer_end == num_layers:
+            if "lm_head.weight" in weights:
+                # Separate LM head
+                self._lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+                self._lm_head.weight.data = weights["lm_head.weight"]
+                self._lm_head.to(self._device, self._dtype)
+                logger.debug(f"Loaded LM head (layer_end={layer_end}, num_layers={num_layers})")
+            elif tie_word_embeddings and "model.embed_tokens.weight" in weights:
+                # Tied embeddings: create LM head using embed_tokens weight
+                self._lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+                self._lm_head.weight.data = weights["model.embed_tokens.weight"]
+                self._lm_head.to(self._device, self._dtype)
+                logger.info(f"Created LM head from tied embeddings (layer_end={layer_end}, num_layers={num_layers})")
+            else:
+                logger.warning(f"LM head not found in weights for last shard (layer_end={layer_end}, num_layers={num_layers}, tied={tie_word_embeddings})")
 
     def _apply_rotary_pos_emb(
         self,
