@@ -79,6 +79,7 @@ class Qwen2Adapter(ModelAdapter):
 
         # Filter weights for this shard's layer range, then move to target device
         shard_weights = {}
+        non_layer_keys = []
         for key, value in state_dict.items():
             if "model.layers." in key:
                 layer_idx = int(key.split("model.layers.")[1].split(".")[0])
@@ -88,12 +89,17 @@ class Qwen2Adapter(ModelAdapter):
                         f"model.layers.{layer_idx - layer_start}.",
                     )
                     shard_weights[new_key] = value.to(dtype=dtype, device=device)
-            elif key == "model.embed_tokens.weight" and layer_start == 0:
-                shard_weights[key] = value.to(dtype=dtype, device=device)
-            elif key == "model.norm.weight" and layer_end == num_layers:
-                shard_weights[key] = value.to(dtype=dtype, device=device)
-            elif key == "lm_head.weight" and layer_end == num_layers:
-                shard_weights[key] = value.to(dtype=dtype, device=device)
+            else:
+                non_layer_keys.append(key)
+                if key == "model.embed_tokens.weight" and layer_start == 0:
+                    shard_weights[key] = value.to(dtype=dtype, device=device)
+                elif key == "model.norm.weight" and layer_end == num_layers:
+                    shard_weights[key] = value.to(dtype=dtype, device=device)
+                elif key == "lm_head.weight" and layer_end == num_layers:
+                    shard_weights[key] = value.to(dtype=dtype, device=device)
+
+        logger.info(f"Non-layer weight keys in checkpoint: {non_layer_keys}")
+        logger.info(f"Shard weights keys: {list(shard_weights.keys())}")
 
         # Free the full state dict from CPU memory
         del state_dict
