@@ -69,6 +69,8 @@ class Qwen2Adapter(ModelAdapter):
             raise ShardError(f"Config not found: {config_path}")
 
         num_layers = self._config.get("num_hidden_layers", 0)
+        logger.info(f"Model config: num_hidden_layers={num_layers}, layer_range=[{layer_start}, {layer_end})")
+
         if layer_end > num_layers:
             raise ShardError(f"layer_end {layer_end} exceeds num_layers {num_layers}")
 
@@ -186,12 +188,16 @@ class Qwen2Adapter(ModelAdapter):
             self._norm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
             self._norm.weight.data = weights["model.norm.weight"]
             self._norm.to(self._device, self._dtype)
+            logger.debug(f"Loaded final norm (layer_end={layer_end}, num_layers={num_layers})")
 
         # LM head (only on last shard)
         if layer_end == num_layers and "lm_head.weight" in weights:
             self._lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
             self._lm_head.weight.data = weights["lm_head.weight"]
             self._lm_head.to(self._device, self._dtype)
+            logger.debug(f"Loaded LM head (layer_end={layer_end}, num_layers={num_layers})")
+        elif layer_end == num_layers:
+            logger.warning(f"LM head not found in weights for last shard (layer_end={layer_end}, num_layers={num_layers})")
 
     def _apply_rotary_pos_emb(
         self,
