@@ -38,8 +38,11 @@ class Qwen2Adapter(ModelAdapter):
         self._lm_head: nn.Linear | None = None
         self._norm: nn.Module | None = None
         self._config: dict[str, Any] = {}
+        self._rotary_emb: nn.Module | None = None
         self._device: torch.device = torch.device("cpu")
         self._dtype: torch.dtype = torch.float32
+        self._layer_start: int = 0
+        self._layer_end: int = 0
         self._loaded = False
 
     def load(
@@ -65,6 +68,8 @@ class Qwen2Adapter(ModelAdapter):
 
         self._device = device
         self._dtype = dtype
+        self._layer_start = layer_start
+        self._layer_end = layer_end
 
         # Load config
         config_path = Path(model_path) / "config.json"
@@ -80,16 +85,8 @@ class Qwen2Adapter(ModelAdapter):
                 f"layer_end {layer_end} exceeds num_layers {num_layers}"
             )
 
-        # Load model weights
-        weights_path = Path(model_path) / "model.safetensors"
-        if not weights_path.exists():
-            # Try sharded checkpoints
-            weights_path = Path(model_path) / "model-00001-of-00001.safetensors"
-            if not weights_path.exists():
-                raise ShardError(f"Weights not found in {model_path}")
-
-        logger.info(f"Loading weights from {weights_path}")
-        state_dict = load_file(str(weights_path), device=str(device))
+        # Load model weights - handle both single and sharded checkpoints
+        state_dict = self._load_weights(Path(model_path), device)
 
         # Filter weights for this shard's layer range
         shard_weights = {}
@@ -116,6 +113,51 @@ class Qwen2Adapter(ModelAdapter):
         self._loaded = True
         logger.info(f"Loaded {len(self._layers)} layers on {device}")
 
+    def _load_weights(self, model_path: Path, device: torch.device) -> dict[str, torch.Tensor]:
+        """Load weights from single or sharded checkpoint.
+
+        Args:
+            model_path: Path to model directory.
+            device: Target device.
+
+        Returns:
+            State dict with all model weights.
+        """
+        device_str = str(device)
+
+        # Try single file first
+        single_file = model_path / "model.safetensors"
+        if single_file.exists():
+            logger.info(f"Loading weights from {single_file} to {device_str}")
+            return load_file(str(single_file), device=device_str)
+
+        # Try sharded checkpoint
+        index_file = model_path / "model.safetensors.index.json"
+        if index_file.exists():
+            logger.info(f"Loading sharded weights from {model_path} to {device_str}")
+            with open(index_file) as f:
+                index = json.load(f)
+
+            # Get unique shard files
+            shard_files = set(index["weight_map"].values())
+            state_dict = {}
+
+            for shard_file in shard_files:
+                shard_path = model_path / shard_file
+                logger.info(f"  Loading shard {shard_file}")
+                shard_data = load_file(str(shard_path), device=device_str)
+                state_dict.update(shard_data)
+
+            return state_dict
+
+        # Try legacy naming
+        legacy_file = model_path / "model-00001-of-00001.safetensors"
+        if legacy_file.exists():
+            logger.info(f"Loading weights from {legacy_file} to {device_str}")
+            return load_file(str(legacy_file), device=device_str)
+
+        raise ShardError(f"No weights found in {model_path}")
+
     def _build_model(
         self,
         weights: dict[str, torch.Tensor],
@@ -128,9 +170,14 @@ class Qwen2Adapter(ModelAdapter):
             Qwen2DecoderLayer,
             Qwen2Config,
             Qwen2RMSNorm,
+            Qwen2RotaryEmbedding,
         )
 
         config = Qwen2Config(**self._config)
+
+        # Create rotary embedding (shared across all layers)
+        self._rotary_emb = Qwen2RotaryEmbedding(config)
+        self._rotary_emb = self._rotary_emb.to(self._device, self._dtype)
 
         # Embedding layer (only on first shard)
         if layer_start == 0 and "model.embed_tokens.weight" in weights:
@@ -150,7 +197,13 @@ class Qwen2Adapter(ModelAdapter):
                 for k, v in weights.items()
                 if k.startswith(f"model.layers.{i}.")
             }
-            layer.load_state_dict(layer_weights, strict=False)
+            # Use strict=True to catch loading errors
+            missing, unexpected = layer.load_state_dict(layer_weights, strict=False)
+            if missing:
+                logger.warning(f"Layer {i} missing keys: {missing}")
+            if unexpected:
+                logger.warning(f"Layer {i} unexpected keys: {unexpected}")
+
             layer.to(self._device, self._dtype)
             layer.eval()
             self._layers.append(layer)
@@ -187,7 +240,7 @@ class Qwen2Adapter(ModelAdapter):
             raise ShardError("Model not loaded")
 
         # Compute RoPE embeddings (required for newer transformers versions)
-        position_embeddings = self._compute_position_embeddings(position_ids)
+        position_embeddings = self._compute_position_embeddings(hidden_states, position_ids)
 
         new_kv_cache = []
         for i, layer in enumerate(self._layers):
@@ -213,28 +266,22 @@ class Qwen2Adapter(ModelAdapter):
         return hidden_states, new_kv_cache
 
     def _compute_position_embeddings(
-        self, position_ids: torch.Tensor
+        self, hidden_states: torch.Tensor, position_ids: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute RoPE position embeddings (cos, sin).
 
         Args:
+            hidden_states: Hidden states [batch, seq, hidden] - needed for device/shape.
             position_ids: Position IDs [batch, seq].
 
         Returns:
             Tuple of (cos, sin) tensors.
         """
-        from transformers.models.qwen2.modeling_qwen2 import Qwen2RotaryEmbedding
-        from transformers.models.qwen2.configuration_qwen2 import Qwen2Config
-
-        # Create config object
-        config = Qwen2Config(**self._config)
-
-        # Create rotary embedding from config
-        rot_emb = Qwen2RotaryEmbedding(config)
-        rot_emb = rot_emb.to(self._device, self._dtype)
+        if self._rotary_emb is None:
+            raise ShardError("Rotary embedding not initialized")
 
         # Compute cos and sin
-        position_embeddings = rot_emb(hidden_states, position_ids)
+        position_embeddings = self._rotary_emb(hidden_states, position_ids)
         return position_embeddings
 
     def embed(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -301,6 +348,7 @@ class Qwen2Adapter(ModelAdapter):
         self._embed_tokens = None
         self._lm_head = None
         self._norm = None
+        self._rotary_emb = None
         self._config.clear()
         self._loaded = False
         if torch.cuda.is_available():
