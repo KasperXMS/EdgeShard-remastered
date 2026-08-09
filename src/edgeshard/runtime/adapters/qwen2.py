@@ -307,9 +307,9 @@ class Qwen2Adapter(ModelAdapter):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        kv_cache: list[tuple[torch.Tensor, torch.Tensor]],
+        kv_cache: Any,
         position_ids: torch.Tensor,
-    ) -> tuple[torch.Tensor, list[tuple[torch.Tensor, torch.Tensor]]]:
+    ) -> tuple[torch.Tensor, Any]:
         """Run forward pass through loaded layers."""
         if not self._loaded:
             raise ShardError("Model not loaded")
@@ -319,35 +319,28 @@ class Qwen2Adapter(ModelAdapter):
         cos, sin = self._compute_rotary_embeddings(position_ids, seq_len)
         position_embeddings = (cos, sin)
 
-        new_kv_cache = []
-
         for i, layer in enumerate(self._layers):
-            # Get KV cache for this layer
-            layer_kv = kv_cache[i] if i < len(kv_cache) else None
-
             # Call the layer with the standard API for transformers 4.44.0
+            # kv_cache is a DynamicCache object that manages all layers internally
             try:
                 outputs = layer(
                     hidden_states,
                     attention_mask=None,
                     position_ids=position_ids,
-                    past_key_value=layer_kv,
+                    past_key_value=kv_cache,
                     use_cache=True,
                     position_embeddings=position_embeddings,
                 )
                 hidden_states = outputs[0]
-                new_kv = outputs[1] if len(outputs) > 1 else None
             except Exception as e:
                 logger.error(f"Layer {i} forward failed: {e}")
                 raise
-
-            new_kv_cache.append(new_kv)
 
         # Apply final norm if this is the last shard
         if self._norm is not None:
             hidden_states = self._norm(hidden_states)
 
-        return hidden_states, new_kv_cache
+        return hidden_states, kv_cache
 
     def embed(self, input_ids: torch.Tensor) -> torch.Tensor:
         """Convert token IDs to embeddings."""
@@ -367,8 +360,12 @@ class Qwen2Adapter(ModelAdapter):
         max_seq_len: int,
         device: torch.device,
     ) -> list[tuple[torch.Tensor, torch.Tensor]]:
-        """Initialize empty KV cache for Qwen2."""
-        return [None] * len(self._layers)
+        """Initialize empty KV cache for Qwen2.
+
+        Uses DynamicCache from transformers for proper KV cache management.
+        """
+        from transformers.cache_utils import DynamicCache
+        return DynamicCache()
 
     def get_model_info(self) -> dict[str, Any]:
         """Return Qwen2 model metadata."""
