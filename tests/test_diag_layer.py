@@ -62,11 +62,7 @@ with torch.no_grad():
     # Need position_ids and position_embeddings
     position_ids = torch.arange(input_ids.shape[1], device=device).unsqueeze(0)
 
-    # Get HF's rotary embeddings
-    from transformers.models.qwen2.modeling_qwen2 import Qwen2RotaryEmbedding
-    hf_rotary = hf_model.model.rotary_emb
-    # In HF 4.44, rotary_emb takes (x, position_ids) and returns (cos, sin)
-    # But it might be called internally. Let's get it directly.
+    # Run HF layer 0 (without position_embeddings, it will compute internally)
     hf_out_layer0 = hf_layer0(
         hf_hidden,
         attention_mask=None,
