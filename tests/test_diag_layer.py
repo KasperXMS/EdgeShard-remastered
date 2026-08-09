@@ -104,23 +104,47 @@ print(f"\nOur cos shape: {cos.shape}, mean={cos.float().mean():.6f}")
 print(f"Our sin shape: {sin.shape}, mean={sin.float().mean():.6f}")
 
 # Step 6: Get HF's rotary embeddings for comparison
-# In HF 4.44, the rotary_emb is on the model level
+# In HF 4.44, the rotary_emb might be at different locations
+# Try to find it
 with torch.no_grad():
-    # The HF rotary_emb.forward takes (x, position_ids)
-    x_for_rotary = hf_hidden  # Use the hidden states as input to get correct dtype/device
-    hf_cos, hf_sin = hf_rotary(x_for_rotary, position_ids)
-print(f"\nHF cos shape: {hf_cos.shape}, mean={hf_cos.float().mean():.6f}")
-print(f"HF sin shape: {hf_sin.shape}, mean={hf_sin.float().mean():.6f}")
+    # Try different locations
+    hf_rotary = None
+    for attr_path in ['model.rotary_emb', 'rotary_emb']:
+        try:
+            obj = hf_model
+            for attr in attr_path.split('.'):
+                obj = getattr(obj, attr)
+            hf_rotary = obj
+            print(f"Found rotary_emb at: {attr_path}")
+            break
+        except AttributeError:
+            continue
+
+    # If not found, it might be in each attention layer
+    if hf_rotary is None:
+        # In some versions, rotary_emb is created per-layer or in the attention module
+        # Let's try to extract cos/sin by running the first layer's attention
+        print("rotary_emb not found directly, will compare via layer output")
+        hf_cos, hf_sin = None, None
+    else:
+        # The HF rotary_emb.forward takes (x, position_ids)
+        x_for_rotary = hf_hidden  # Use the hidden states as input to get correct dtype/device
+        hf_cos, hf_sin = hf_rotary(x_for_rotary, position_ids)
+        print(f"\nHF cos shape: {hf_cos.shape}, mean={hf_cos.float().mean():.6f}")
+        print(f"HF sin shape: {hf_sin.shape}, mean={hf_sin.float().mean():.6f}")
 
 # Compare
-if cos.shape == hf_cos.shape:
-    cos_diff = (cos - hf_cos).abs().max().item()
-    sin_diff = (sin - hf_sin).abs().max().item()
-    print(f"\nCos diff: {cos_diff}")
-    print(f"Sin diff: {sin_diff}")
+if hf_cos is not None and hf_sin is not None:
+    if cos.shape == hf_cos.shape:
+        cos_diff = (cos - hf_cos).abs().max().item()
+        sin_diff = (sin - hf_sin).abs().max().item()
+        print(f"\nCos diff: {cos_diff}")
+        print(f"Sin diff: {sin_diff}")
+    else:
+        print(f"\nSHAPE MISMATCH: our cos={cos.shape}, HF cos={hf_cos.shape}")
+        print(f"our sin={sin.shape}, HF sin={hf_sin.shape}")
 else:
-    print(f"\nSHAPE MISMATCH: our cos={cos.shape}, HF cos={hf_cos.shape}")
-    print(f"our sin={sin.shape}, HF sin={hf_sin.shape}")
+    print("\nCould not extract HF rotary embeddings for direct comparison")
 
 # Step 7: Run our layer 0
 with torch.no_grad():
@@ -147,22 +171,26 @@ if layer_diff.max() < 0.01:
 else:
     print("\n❌ Layer 0 outputs DIVERGE! Problem is in rotary embeddings or attention mechanism.")
 
-    # Try with HF's rotary embeddings instead
-    print("\n=== Trying with HF rotary embeddings ===")
-    with torch.no_grad():
-        our_out_with_hf_rotary = our_layer0(
-            our_hidden,
-            attention_mask=None,
-            position_ids=position_ids,
-            past_key_value=None,
-            use_cache=False,
-            position_embeddings=(hf_cos, hf_sin),
-        )
-        our_hidden_hf_rotary = our_out_with_hf_rotary[0]
+    # Try with HF's rotary embeddings instead (if available)
+    if hf_cos is not None and hf_sin is not None:
+        print("\n=== Trying with HF rotary embeddings ===")
+        with torch.no_grad():
+            our_out_with_hf_rotary = our_layer0(
+                our_hidden,
+                attention_mask=None,
+                position_ids=position_ids,
+                past_key_value=None,
+                use_cache=False,
+                position_embeddings=(hf_cos, hf_sin),
+            )
+            our_hidden_hf_rotary = our_out_with_hf_rotary[0]
 
-    diff_with_hf = (hf_hidden_after_layer0 - our_hidden_hf_rotary).abs()
-    print(f"With HF rotary: mean={diff_with_hf.mean():.6f}, max={diff_with_hf.max():.6f}")
-    if diff_with_hf.max() < 0.01:
-        print("✅ Confirmed: problem is in our rotary embedding computation!")
+        diff_with_hf = (hf_hidden_after_layer0 - our_hidden_hf_rotary).abs()
+        print(f"With HF rotary: mean={diff_with_hf.mean():.6f}, max={diff_with_hf.max():.6f}")
+        if diff_with_hf.max() < 0.01:
+            print("✅ Confirmed: problem is in our rotary embedding computation!")
+        else:
+            print("❌ Still diverges. Problem is in something else (attention implementation?)")
     else:
-        print("❌ Still diverges. Problem is in something else (attention implementation?)")
+        print("\nCannot compare with HF rotary embeddings (not accessible)")
+        print("The problem is likely in our rotary embedding computation or layer implementation.")
