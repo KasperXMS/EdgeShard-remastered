@@ -186,6 +186,9 @@ class Qwen2Adapter(ModelAdapter):
         if not self._loaded:
             raise ShardError("Model not loaded")
 
+        # Compute RoPE embeddings (required for newer transformers versions)
+        position_embeddings = self._compute_position_embeddings(position_ids)
+
         new_kv_cache = []
         for i, layer in enumerate(self._layers):
             # Get KV cache for this layer
@@ -196,6 +199,7 @@ class Qwen2Adapter(ModelAdapter):
                 hidden_states,
                 past_key_value=layer_kv,
                 position_ids=position_ids,
+                position_embeddings=position_embeddings,
                 use_cache=True,
             )
             hidden_states = outputs[0]
@@ -207,6 +211,38 @@ class Qwen2Adapter(ModelAdapter):
             hidden_states = self._norm(hidden_states)
 
         return hidden_states, new_kv_cache
+
+    def _compute_position_embeddings(
+        self, position_ids: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Compute RoPE position embeddings (cos, sin).
+
+        Args:
+            position_ids: Position IDs [batch, seq].
+
+        Returns:
+            Tuple of (cos, sin) tensors.
+        """
+        from transformers.models.qwen2.modeling_qwen2 import Qwen2RotaryEmbedding
+
+        # Get config values
+        hidden_size = self._config.get("hidden_size", 0)
+        num_heads = self._config.get("num_attention_heads", 0)
+        head_dim = hidden_size // num_heads
+        max_position_embeddings = self._config.get("max_position_embeddings", 2048)
+        rope_theta = self._config.get("rope_theta", 10000.0)
+
+        # Create rotary embedding
+        rot_emb = Qwen2RotaryEmbedding(
+            dim=head_dim,
+            max_position_embeddings=max_position_embeddings,
+            base=rope_theta,
+        )
+        rot_emb = rot_emb.to(self._device, self._dtype)
+
+        # Compute cos and sin
+        position_embeddings = rot_emb(hidden_states, position_ids)
+        return position_embeddings
 
     def embed(self, input_ids: torch.Tensor) -> torch.Tensor:
         """Convert token IDs to embeddings.
