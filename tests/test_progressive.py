@@ -35,19 +35,22 @@ for num_layers in [1, 2, 4, 8, 12, 24]:
     hf_h = hf_hidden.clone()
     with torch.no_grad():
         position_ids = torch.arange(input_ids.shape[1], device=device).unsqueeze(0)
-        for i in range(num_layers):
-            out = hf_model.model.layers[i](
-                hf_h,
-                attention_mask=None,
-                position_ids=position_ids,
-                past_key_value=None,
-                use_cache=False,
-            )
-            hf_h = out[0]
 
-    # Apply HF final norm if this is all layers
-    if num_layers == 24:
-        hf_h = hf_model.model.norm(hf_h)
+        if num_layers < 24:
+            # For partial layers, iterate manually
+            for i in range(num_layers):
+                out = hf_model.model.layers[i](
+                    hf_h,
+                    attention_mask=None,
+                    position_ids=position_ids,
+                    past_key_value=None,
+                    use_cache=False,
+                )
+                hf_h = out[0]
+        else:
+            # For full model, use proper HF forward to get correct hidden states
+            hf_outputs = hf_model(input_ids, output_hidden_states=True)
+            hf_h = hf_outputs.hidden_states[-1]  # Last hidden state (after norm)
 
     # Now run through our implementation
     from edgeshard.runtime.adapters.qwen2 import Qwen2Adapter
@@ -58,10 +61,8 @@ for num_layers in [1, 2, 4, 8, 12, 24]:
         our_hidden_init = adapter.embed(input_ids)
         kv_cache = adapter.init_kv_cache(1, 100, torch.device(device))
         our_h, _ = adapter.forward(our_hidden_init, kv_cache, position_ids)
-
-        # Apply final norm if this is all layers
-        if num_layers == 24:
-            our_h = adapter._norm(our_h)
+        # Note: adapter.forward() already applies self._norm for last shard
+        # No need to apply it again here
 
     # Compare
     diff = (hf_h - our_h).abs()
@@ -81,8 +82,9 @@ for num_layers in [1, 2, 4, 8, 12, 24]:
 if num_layers == 24:
     print("\n=== Testing logits ===")
     with torch.no_grad():
-        # HF logits
-        hf_logits = hf_model.lm_head(hf_h)
+        # HF logits - use proper HF forward (not manual iteration)
+        hf_outputs = hf_model(input_ids)
+        hf_logits = hf_outputs.logits
 
         # Our logits
         our_logits = adapter.compute_logits(our_h)
