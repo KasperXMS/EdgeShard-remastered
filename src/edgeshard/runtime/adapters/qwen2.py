@@ -241,24 +241,41 @@ class Qwen2Adapter(ModelAdapter):
         """
         from transformers.models.qwen2.modeling_qwen2 import (
             Qwen2Config,
-            Qwen2RotaryEmbedding,
+            rotate_half,
         )
 
         config = Qwen2Config(**self._config)
         head_dim = config.hidden_size // config.num_attention_heads
+        base = config.rope_theta
+        max_position_embeddings = config.max_position_embeddings
 
-        # Create rotary embedding
-        rotary_emb = Qwen2RotaryEmbedding(
-            dim=head_dim,
-            max_position_embeddings=config.max_position_embeddings,
-            base=config.rope_theta,
+        # Compute inverse frequencies
+        inv_freq = 1.0 / (
+            base ** (torch.arange(0, head_dim, 2, dtype=torch.float32, device=self._device) / head_dim)
         )
-        rotary_emb = rotary_emb.to(self._device, self._dtype)
 
-        # Compute embeddings
-        value = rotary_emb(rotary_emb.inv_freq, position_ids)
-        cos = value[0]  # [seq_len, head_dim]
-        sin = value[1]  # [seq_len, head_dim]
+        # Compute cos/sin for the given position_ids
+        # position_ids: [batch, seq_len]
+        # We need to compute freqs for each position
+        batch_size, seq_len_actual = position_ids.shape
+
+        # Create position indices [seq_len]
+        position_ids_flat = position_ids.reshape(-1)  # [batch * seq_len]
+
+        # Compute outer product: [batch * seq_len, head_dim/2]
+        freqs = torch.outer(position_ids_flat.float(), inv_freq)
+
+        # Reshape to [batch, seq_len, head_dim/2]
+        freqs = freqs.reshape(batch_size, seq_len_actual, -1)
+
+        # Create cos/sin embeddings [batch, seq_len, head_dim]
+        emb = torch.cat((freqs, freqs), dim=-1)
+        cos = emb.cos()
+        sin = emb.sin()
+
+        # Reshape for broadcasting: [batch, 1, seq_len, head_dim]
+        cos = cos.unsqueeze(1)
+        sin = sin.unsqueeze(1)
 
         return cos, sin
 
