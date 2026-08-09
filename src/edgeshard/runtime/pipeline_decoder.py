@@ -81,12 +81,14 @@ class PipelineDecoder:
             # Prefill: process prompt through entire pipeline
             logits = await self._pipeline.prefill(session_id, input_ids=input_ids)
 
+            logger.debug(f"Prefill logits shape: {logits.shape}")
+
             # Get first token from last position
             next_token_logits = logits[0, -1, :]
             next_token = self._select_token(next_token_logits, config)
 
             generated_tokens = [next_token]
-            logger.debug(f"Generated token 1: {next_token}")
+            logger.debug(f"Generated token 1: {next_token} ({self._tokenizer.decode([next_token])})")
 
             # Decode loop
             for i in range(config.max_new_tokens - 1):
@@ -97,11 +99,14 @@ class PipelineDecoder:
 
                 # Single-token decode through entire pipeline
                 logits = await self._pipeline.decode(session_id, token_id=next_token)
+
+                logger.debug(f"Decode step {i+2}: logits shape={logits.shape}")
+
                 next_token_logits = logits[0, -1, :]
                 next_token = self._select_token(next_token_logits, config)
 
                 generated_tokens.append(next_token)
-                logger.debug(f"Generated token {i + 2}: {next_token}")
+                logger.debug(f"Generated token {i + 2}: {next_token} ({self._tokenizer.decode([next_token])})")
 
             # Decode to text
             generated_text = self._tokenizer.decode(

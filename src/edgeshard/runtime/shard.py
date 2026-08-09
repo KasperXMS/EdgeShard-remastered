@@ -180,6 +180,11 @@ class ModelShard:
         session.kv_cache = new_kv_cache
         session.sequence_length += seq_len
 
+        logger.debug(
+            f"Prefill: seq_len={seq_len}, total_seq_length={session.sequence_length}, "
+            f"kv_cache_type={type(session.kv_cache).__name__}"
+        )
+
         # If last shard, compute logits
         if self._is_last_shard:
             logits = self._adapter.compute_logits(hidden_states)
@@ -245,6 +250,11 @@ class ModelShard:
         )
         session.kv_cache = new_kv_cache
         session.sequence_length += 1
+
+        logger.debug(
+            f"Decode: token_id={token_id}, position={position_ids.item()}, "
+            f"total_seq_length={session.sequence_length}"
+        )
 
         # If last shard, compute logits
         if self._is_last_shard:

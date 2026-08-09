@@ -1,8 +1,12 @@
 # test_inference.py
 import asyncio
+import logging
 import torch
 from pathlib import Path
 from transformers import AutoTokenizer
+
+# Enable debug logging
+logging.basicConfig(level=logging.DEBUG)
 
 from edgeshard.runtime.adapters.qwen2 import Qwen2Adapter
 from edgeshard.runtime.shard import ModelShard

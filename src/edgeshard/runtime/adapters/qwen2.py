@@ -320,6 +320,11 @@ class Qwen2Adapter(ModelAdapter):
         cos, sin = self._compute_rotary_embeddings(position_ids, seq_len)
         position_embeddings = (cos, sin)
 
+        logger.debug(
+            f"Forward: hidden_states={hidden_states.shape}, "
+            f"position_ids={position_ids}, kv_cache_type={type(kv_cache).__name__}"
+        )
+
         for i, layer in enumerate(self._layers):
             # Call the layer with the standard API for transformers 4.44.0
             # kv_cache is a DynamicCache object that manages all layers internally
@@ -336,6 +341,10 @@ class Qwen2Adapter(ModelAdapter):
             except Exception as e:
                 logger.error(f"Layer {i} forward failed: {e}")
                 raise
+
+        # Log KV cache state after forward
+        if hasattr(kv_cache, 'get_seq_length'):
+            logger.debug(f"KV cache seq_length after forward: {kv_cache.get_seq_length()}")
 
         # Apply final norm if this is the last shard
         if self._norm is not None:
