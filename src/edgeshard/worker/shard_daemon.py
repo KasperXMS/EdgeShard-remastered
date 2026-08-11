@@ -77,6 +77,10 @@ class ShardDaemon:
         dtype = dtype_map.get(self._dtype, torch.float16)
 
         logger.info(f"Loading model on {device} with dtype {dtype}")
+
+        # Auto-download model from HuggingFace if not found locally
+        self._model_path = self._ensure_model_available(self._model_path)
+
         self._adapter = Qwen2Adapter()
         self._adapter.load(
             model_path=self._model_path,
@@ -119,3 +123,70 @@ class ShardDaemon:
     def get_shard(self) -> ModelShard | None:
         """Get the ModelShard instance (for testing)."""
         return self._shard
+
+    def _ensure_model_available(self, model_path: str) -> str:
+        """Ensure model is available locally, downloading from HuggingFace if needed.
+
+        Args:
+            model_path: HuggingFace model ID (e.g., "Qwen/Qwen2.5-7B-Instruct")
+                or local path.
+
+        Returns:
+            Local path to the model (downloaded if necessary).
+        """
+        # Check if it's a local path that exists
+        local_path = Path(model_path)
+        if local_path.exists() and (local_path / "config.json").exists():
+            return model_path
+
+        # Check under models/ directory
+        model_name = model_path.split("/")[-1] if "/" in model_path else model_path
+        models_dir = Path("models") / model_name
+        if models_dir.exists() and (models_dir / "config.json").exists():
+            return str(models_dir)
+
+        # Check HF cache
+        hf_cache = Path.home() / ".cache" / "huggingface" / "hub"
+        # HF cache format: models--<org>--<model>
+        cache_name = f"models--{model_path.replace('/', '--')}"
+        cache_dir = hf_cache / cache_name
+        if cache_dir.exists():
+            # Find the snapshot directory
+            snapshots_dir = cache_dir / "snapshots"
+            if snapshots_dir.exists():
+                for snapshot in snapshots_dir.iterdir():
+                    if (snapshot / "config.json").exists():
+                        logger.info(f"Found model in HF cache: {snapshot}")
+                        return str(snapshot)
+
+        # Model not found locally — try to download from HuggingFace
+        if "/" in model_path:
+            logger.info(f"Model not found locally. Downloading {model_path} from HuggingFace...")
+            try:
+                from huggingface_hub import snapshot_download
+
+                local_dir = Path("models") / model_name
+                local_dir.mkdir(parents=True, exist_ok=True)
+
+                downloaded_path = snapshot_download(
+                    repo_id=model_path,
+                    local_dir=str(local_dir),
+                    local_dir_use_symlinks=False,
+                )
+                logger.info(f"Model downloaded to: {downloaded_path}")
+                return downloaded_path
+
+            except ImportError:
+                logger.error(
+                    "huggingface_hub not installed. Install with: pip install huggingface_hub"
+                )
+                raise
+            except Exception as e:
+                logger.error(f"Failed to download model from HuggingFace: {e}")
+                raise
+
+        # Not a HF model ID and not found locally
+        raise FileNotFoundError(
+            f"Model not found: {model_path}. "
+            f"Provide a valid local path or HuggingFace model ID."
+        )
