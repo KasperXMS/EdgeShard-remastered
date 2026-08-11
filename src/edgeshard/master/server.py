@@ -30,6 +30,8 @@ class EdgeShardMasterServicer(edgeshard_pb2_grpc.WorkerServiceServicer):
 
     def __init__(self) -> None:
         self._worker_manager = WorkerManager()
+        # M8: Deployment state tracking
+        self._deployments: dict[str, dict] = {}  # service_name -> deployment info
 
     async def RegisterWorker(
         self,
@@ -132,12 +134,18 @@ class EdgeShardMasterServicer(edgeshard_pb2_grpc.WorkerServiceServicer):
         request: edgeshard_pb2.DeployServiceRequest,
         context: grpc.ServicerContext,
     ) -> edgeshard_pb2.DeployServiceResponse:
-        """Deploy a service (placeholder for M8)."""
+        """Deploy a service (M8)."""
         logger.info(f"Deploy service request: {request.spec.name}")
-        # TODO (M8): Implement actual deployment logic
+        # Store deployment info
+        self._deployments[request.spec.name] = {
+            "spec": request.spec,
+            "status": "deploying",
+            "shards": [],
+        }
         return edgeshard_pb2.DeployServiceResponse(
-            success=False,
-            message="Deployment not yet implemented (M8)",
+            success=True,
+            message=f"Service {request.spec.name} deployment initiated",
+            service_name=request.spec.name,
         )
 
     async def ListServices(
@@ -145,20 +153,28 @@ class EdgeShardMasterServicer(edgeshard_pb2_grpc.WorkerServiceServicer):
         request: edgeshard_pb2.ListServicesRequest,
         context: grpc.ServicerContext,
     ) -> edgeshard_pb2.ListServicesResponse:
-        """List deployed services (placeholder for M8)."""
-        # TODO (M8): Implement service listing
-        return edgeshard_pb2.ListServicesResponse(service_names=[])
+        """List deployed services (M8)."""
+        return edgeshard_pb2.ListServicesResponse(
+            service_names=list(self._deployments.keys())
+        )
 
     async def GetServiceStatus(
         self,
         request: edgeshard_pb2.GetServiceStatusRequest,
         context: grpc.ServicerContext,
     ) -> edgeshard_pb2.GetServiceStatusResponse:
-        """Get service status (placeholder for M8)."""
-        # TODO (M8): Implement service status
+        """Get service status (M8)."""
+        deployment = self._deployments.get(request.service_name)
+        if deployment is None:
+            return edgeshard_pb2.GetServiceStatusResponse(
+                service_name=request.service_name,
+                status="not_found",
+            )
         return edgeshard_pb2.GetServiceStatusResponse(
             service_name=request.service_name,
-            status="not_found",
+            status=deployment.get("status", "unknown"),
+            shard_count=len(deployment.get("shards", [])),
+            message=f"Service {request.service_name}",
         )
 
     async def StopService(
@@ -166,12 +182,102 @@ class EdgeShardMasterServicer(edgeshard_pb2_grpc.WorkerServiceServicer):
         request: edgeshard_pb2.StopServiceRequest,
         context: grpc.ServicerContext,
     ) -> edgeshard_pb2.StopServiceResponse:
-        """Stop a service (placeholder for M8)."""
+        """Stop a service (M8)."""
         logger.info(f"Stop service request: {request.service_name}")
-        # TODO (M8): Implement service stop
+        if request.service_name in self._deployments:
+            self._deployments[request.service_name]["status"] = "stopped"
+            return edgeshard_pb2.StopServiceResponse(
+                success=True,
+                message=f"Service {request.service_name} stopped",
+            )
         return edgeshard_pb2.StopServiceResponse(
             success=False,
-            message="Service stop not yet implemented (M8)",
+            message=f"Service {request.service_name} not found",
+        )
+
+    async def RegisterShards(
+        self,
+        request: edgeshard_pb2.RegisterShardsRequest,
+        context: grpc.ServicerContext,
+    ) -> edgeshard_pb2.RegisterShardsResponse:
+        """Register deployed shards for a service (M8).
+
+        Called by `edgeshard deploy` after shards are started.
+        """
+        service_name = request.service_name
+        if service_name not in self._deployments:
+            self._deployments[service_name] = {
+                "spec": None,
+                "status": "ready",
+                "shards": [],
+            }
+
+        # Store shard endpoints
+        self._deployments[service_name]["shards"] = [
+            {
+                "shard_id": s.shard_id,
+                "worker_id": s.worker_id,
+                "data_address": s.data_address,
+                "layer_start": s.layer_start,
+                "layer_end": s.layer_end,
+                "device": s.device,
+            }
+            for s in request.shards
+        ]
+        self._deployments[service_name]["status"] = "ready"
+
+        logger.info(
+            f"Registered {len(request.shards)} shard(s) for service {service_name}"
+        )
+
+        return edgeshard_pb2.RegisterShardsResponse(
+            success=True,
+            message=f"Registered {len(request.shards)} shard(s)",
+        )
+
+    async def GetShardEndpoints(
+        self,
+        request: edgeshard_pb2.GetShardEndpointsRequest,
+        context: grpc.ServicerContext,
+    ) -> edgeshard_pb2.GetShardEndpointsResponse:
+        """Get shard endpoints for inference (M8).
+
+        Called by `edgeshard infer` to discover shard addresses.
+        """
+        service_name = request.service_name
+        deployment = self._deployments.get(service_name)
+
+        if deployment is None:
+            # If no service name specified, try to find any ready deployment
+            if not service_name:
+                for name, dep in self._deployments.items():
+                    if dep.get("status") == "ready" and dep.get("shards"):
+                        deployment = dep
+                        service_name = name
+                        break
+
+            if deployment is None:
+                context.set_code(grpc.StatusCode.NOT_FOUND)
+                context.set_details(f"No deployed service found")
+                return edgeshard_pb2.GetShardEndpointsResponse()
+
+        # Build endpoint list
+        endpoints = []
+        for shard in deployment.get("shards", []):
+            endpoints.append(
+                edgeshard_pb2.ShardEndpoint(
+                    shard_id=shard["shard_id"],
+                    worker_id=shard["worker_id"],
+                    data_address=shard["data_address"],
+                    layer_start=shard["layer_start"],
+                    layer_end=shard["layer_end"],
+                    device=shard["device"],
+                )
+            )
+
+        return edgeshard_pb2.GetShardEndpointsResponse(
+            service_name=service_name,
+            endpoints=endpoints,
         )
 
     async def Profile(

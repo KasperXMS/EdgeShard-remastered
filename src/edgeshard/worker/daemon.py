@@ -14,8 +14,11 @@ One Worker may host multiple Shards and profiler jobs.
 from __future__ import annotations
 
 import asyncio
+import subprocess
+import sys
 import time
 import uuid
+from concurrent import futures
 from typing import Any
 
 import grpc
@@ -35,6 +38,107 @@ from edgeshard.worker.network_probe import NetworkProbe
 logger = get_logger(__name__)
 
 
+class WorkerServicer(edgeshard_pb2_grpc.WorkerServiceServicer):
+    """gRPC servicer for Worker-side commands (M8 deployment).
+
+    This handles StartShard, StopShard, ListShards RPCs from the Master.
+    """
+
+    def __init__(self, daemon: "WorkerDaemon") -> None:
+        self._daemon = daemon
+
+    async def StartShard(
+        self,
+        request: edgeshard_pb2.StartShardRequest,
+        context: grpc.ServicerContext,
+    ) -> edgeshard_pb2.StartShardResponse:
+        """Handle StartShard RPC from Master."""
+        logger.info(
+            f"StartShard request: {request.shard_id} "
+            f"(layers {request.layer_start}:{request.layer_end}, "
+            f"device {request.device})"
+        )
+
+        try:
+            # Spawn shard as subprocess
+            data_address = await self._daemon.spawn_shard(
+                shard_id=request.shard_id,
+                model_name=request.model_name,
+                model_revision=request.model_revision,
+                dtype=request.dtype,
+                layer_start=request.layer_start,
+                layer_end=request.layer_end,
+                device=request.device,
+                data_host=request.data_host or "0.0.0.0",
+                data_port=request.data_port or 50100,
+                is_first_shard=request.is_first_shard,
+                is_last_shard=request.is_last_shard,
+                master_address=request.master_address,
+            )
+
+            return edgeshard_pb2.StartShardResponse(
+                success=True,
+                message=f"Shard {request.shard_id} started",
+                shard_id=request.shard_id,
+                data_address=data_address,
+            )
+
+        except Exception as e:
+            logger.error(f"Failed to start shard {request.shard_id}: {e}")
+            return edgeshard_pb2.StartShardResponse(
+                success=False,
+                message=f"Failed to start shard: {e}",
+                shard_id=request.shard_id,
+            )
+
+    async def StopShard(
+        self,
+        request: edgeshard_pb2.StopShardRequest,
+        context: grpc.ServicerContext,
+    ) -> edgeshard_pb2.StopShardResponse:
+        """Handle StopShard RPC from Master."""
+        logger.info(f"StopShard request: {request.shard_id}")
+
+        try:
+            success = await self._daemon.stop_shard(request.shard_id)
+            return edgeshard_pb2.StopShardResponse(
+                success=success,
+                message="Shard stopped" if success else "Shard not found",
+            )
+        except Exception as e:
+            logger.error(f"Failed to stop shard {request.shard_id}: {e}")
+            return edgeshard_pb2.StopShardResponse(
+                success=False,
+                message=f"Failed to stop shard: {e}",
+            )
+
+    async def ListShards(
+        self,
+        request: edgeshard_pb2.ListShardsRequest,
+        context: grpc.ServicerContext,
+    ) -> edgeshard_pb2.ListShardsResponse:
+        """Handle ListShards RPC from Master."""
+        shards = self._daemon.list_shards()
+        shard_infos = []
+
+        for shard in shards:
+            shard_infos.append(
+                edgeshard_pb2.ShardInfo(
+                    shard_id=shard["shard_id"],
+                    model_name=shard.get("model_name", ""),
+                    layer_start=shard.get("layer_start", 0),
+                    layer_end=shard.get("layer_end", 0),
+                    device=shard.get("device", ""),
+                    status=shard.get("status", "unknown"),
+                    data_address=shard.get("data_address", ""),
+                    start_time=shard.get("start_time", 0),
+                    pid=str(shard.get("pid", "")),
+                )
+            )
+
+        return edgeshard_pb2.ListShardsResponse(shards=shard_infos)
+
+
 class WorkerDaemon:
     """Worker daemon that registers with Master and maintains heartbeat."""
 
@@ -50,6 +154,11 @@ class WorkerDaemon:
         self._network_probe = NetworkProbe(self._worker_id)
         self._known_workers: dict[str, tuple[str, int]] = {}  # worker_id -> (host, port)
 
+        # M8: Shard management
+        self._server: grpc.aio.Server | None = None
+        self._shards: dict[str, dict] = {}  # shard_id -> shard info
+        self._shard_processes: dict[str, subprocess.Popen] = {}  # shard_id -> process
+
     @property
     def worker_id(self) -> str:
         return self._worker_id
@@ -58,6 +167,9 @@ class WorkerDaemon:
         """Start the Worker daemon."""
         logger.info(f"Starting Worker {self._worker_id} on {self._hostname}")
         logger.info(f"Discovered {len(self._devices)} device(s)")
+
+        # Start Worker gRPC server (for receiving deployment commands from Master)
+        await self._start_grpc_server()
 
         # Connect to Master
         master_address = self._config.registration.master_address
@@ -90,6 +202,14 @@ class WorkerDaemon:
             except asyncio.CancelledError:
                 pass
 
+        # Stop all shards
+        for shard_id in list(self._shards.keys()):
+            await self.stop_shard(shard_id)
+
+        # Stop gRPC server
+        if self._server:
+            await self._server.stop(grace=2.0)
+
         # Unregister from Master
         if self._stub:
             await self._unregister()
@@ -98,6 +218,149 @@ class WorkerDaemon:
             await self._channel.close()
 
         logger.info("Worker stopped")
+
+    async def _start_grpc_server(self) -> None:
+        """Start the Worker gRPC server for deployment commands."""
+        # Use a port offset from the master port
+        # Master uses 10500, Worker uses 10600 by default
+        worker_port = 10600
+
+        self._server = grpc.aio.server(futures.ThreadPoolExecutor(max_workers=4))
+
+        # Add servicer
+        servicer = WorkerServicer(self)
+        edgeshard_pb2_grpc.add_WorkerServiceServicer_to_server(servicer, self._server)
+
+        bind_address = f"0.0.0.0:{worker_port}"
+        self._server.add_insecure_port(bind_address)
+        await self._server.start()
+
+        logger.info(f"Worker gRPC server listening on {bind_address}")
+
+    # -------------------------------------------------------------------------
+    # M8: Shard management
+    # -------------------------------------------------------------------------
+
+    async def spawn_shard(
+        self,
+        shard_id: str,
+        model_name: str,
+        model_revision: str,
+        dtype: str,
+        layer_start: int,
+        layer_end: int,
+        device: str,
+        data_host: str,
+        data_port: int,
+        is_first_shard: bool,
+        is_last_shard: bool,
+        master_address: str,
+    ) -> str:
+        """Spawn a shard subprocess.
+
+        Returns:
+            Data address (host:port) of the shard.
+        """
+        if shard_id in self._shard_processes:
+            raise RuntimeError(f"Shard {shard_id} already running")
+
+        # Build command
+        cmd = [
+            sys.executable,
+            "-m",
+            "edgeshard",
+            "shard",
+            "start",
+            model_name,
+            "--shard-id",
+            shard_id,
+            "--layers",
+            f"{layer_start}:{layer_end}",
+            "--dtype",
+            dtype,
+            "--host",
+            data_host,
+            "--port",
+            str(data_port),
+        ]
+
+        if is_first_shard:
+            cmd.append("--first")
+        if is_last_shard:
+            cmd.append("--last")
+
+        logger.info(f"Spawning shard: {' '.join(cmd)}")
+
+        # Start subprocess
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+        self._shard_processes[shard_id] = proc
+        self._shards[shard_id] = {
+            "shard_id": shard_id,
+            "model_name": model_name,
+            "layer_start": layer_start,
+            "layer_end": layer_end,
+            "device": device,
+            "status": "starting",
+            "data_address": f"{data_host}:{data_port}",
+            "start_time": int(time.time()),
+            "pid": proc.pid,
+        }
+
+        # Wait a bit for the shard to start
+        await asyncio.sleep(2.0)
+
+        # Check if process is still running
+        if proc.poll() is None:
+            self._shards[shard_id]["status"] = "ready"
+            logger.info(f"Shard {shard_id} started (PID: {proc.pid})")
+        else:
+            _, stderr = proc.communicate()
+            self._shards[shard_id]["status"] = "failed"
+            error_msg = stderr.decode()[:500]
+            logger.error(f"Shard {shard_id} failed to start: {error_msg}")
+            raise RuntimeError(f"Shard failed to start: {error_msg}")
+
+        return f"{data_host}:{data_port}"
+
+    async def stop_shard(self, shard_id: str) -> bool:
+        """Stop a running shard."""
+        proc = self._shard_processes.get(shard_id)
+        if proc is None:
+            return False
+
+        try:
+            proc.terminate()
+            proc.wait(timeout=10.0)
+            if shard_id in self._shards:
+                self._shards[shard_id]["status"] = "stopped"
+            del self._shard_processes[shard_id]
+            logger.info(f"Shard {shard_id} stopped")
+            return True
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            if shard_id in self._shards:
+                self._shards[shard_id]["status"] = "stopped"
+            del self._shard_processes[shard_id]
+            return True
+        except Exception as e:
+            logger.error(f"Error stopping shard {shard_id}: {e}")
+            return False
+
+    def list_shards(self) -> list[dict]:
+        """List all shards on this Worker."""
+        # Update status based on process state
+        for shard_id, proc in list(self._shard_processes.items()):
+            if proc.poll() is not None:
+                if shard_id in self._shards:
+                    self._shards[shard_id]["status"] = "stopped"
+                del self._shard_processes[shard_id]
+
+        return list(self._shards.values())
 
     async def _register(self) -> None:
         """Register this Worker with the Master."""

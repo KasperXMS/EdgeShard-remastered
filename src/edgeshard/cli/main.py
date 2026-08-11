@@ -149,7 +149,7 @@ def node_metrics(
 @cluster_app.command("snapshot")
 def cluster_snapshot(
     output: str = typer.Option(
-        "cluster.yaml",
+        ".edgeshard/cluster.yaml",
         "--output",
         "-o",
         help="Output path for the cluster YAML.",
@@ -220,11 +220,11 @@ def profile_list() -> None:
 @app.command("plan")
 def plan_generate(
     service_yaml: str = typer.Argument(
-        ...,
+        ".edgeshard/service.yaml",
         help="Path to service specification YAML.",
     ),
     output: str = typer.Option(
-        "plan.yaml",
+        ".edgeshard/plan.yaml",
         "--output",
         "-o",
         help="Output path for the generated PlacementPlan.",
@@ -250,6 +250,53 @@ def plan_generate(
         output_path=output,
         master=master,
         cluster_yaml=cluster_yaml,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Deploy command (M8)
+# ---------------------------------------------------------------------------
+
+@app.command("deploy")
+def deploy(
+    plan_yaml: str = typer.Argument(
+        ".edgeshard/plan.yaml",
+        help="Path to placement plan YAML.",
+    ),
+    master: str = typer.Option(
+        "localhost:10500",
+        "--master",
+        "-m",
+        help="Master address (host:port).",
+    ),
+    wait: bool = typer.Option(
+        True,
+        "--wait/--no-wait",
+        help="Wait for all shards to be ready.",
+    ),
+    timeout: float = typer.Option(
+        120.0,
+        "--timeout",
+        "-t",
+        help="Maximum wait time in seconds.",
+    ),
+) -> None:
+    """Deploy a placement plan to the cluster.
+
+    Reads the plan YAML and sends StartShard commands to the appropriate
+    Workers via gRPC. Workers spawn shard subprocesses locally.
+
+    Example:
+        edgeshard deploy .edgeshard/plan.yaml
+        edgeshard deploy .edgeshard/plan.yaml --master 192.168.1.10:10500
+    """
+    from edgeshard.cli.deploy_cmd import deploy_service
+
+    deploy_service(
+        plan_yaml=plan_yaml,
+        master=master,
+        wait=wait,
+        timeout=timeout,
     )
 
 
@@ -305,7 +352,7 @@ def service_init(
         help="HuggingFace model ID or local path (e.g. Qwen/Qwen2.5-7B-Instruct).",
     ),
     output: str = typer.Option(
-        "service.yaml",
+        ".edgeshard/service.yaml",
         "--output",
         "-o",
         help="Output path for the generated service YAML.",
@@ -413,14 +460,178 @@ def shard_start(
 def infer(
     prompt: str = typer.Argument(..., help="Input prompt text."),
     shards: str = typer.Option(
-        ...,
+        None,
         "--shards",
-        help="Comma-separated shard addresses (e.g., localhost:50100,localhost:50101).",
+        "-s",
+        help="Comma-separated shard addresses. If omitted, auto-discover from Master.",
+    ),
+    master: str = typer.Option(
+        "localhost:10500",
+        "--master",
+        "-m",
+        help="Master address for auto-discovery (used when --shards is not specified).",
+    ),
+    service: str = typer.Option(
+        None,
+        "--service",
+        help="Service name to infer against. If omitted, uses any deployed service.",
     ),
     max_tokens: int = typer.Option(100, "--max-tokens", help="Max tokens to generate."),
 ) -> None:
-    """Run distributed inference across multiple shards."""
+    """Run distributed inference across multiple shards.
+
+    If --shards is not specified, automatically discovers shard addresses from Master.
+    """
     from edgeshard.cli.infer_cmd import run_inference
 
-    shard_addresses = [addr.strip() for addr in shards.split(",")]
-    run_inference(prompt=prompt, shard_addresses=shard_addresses, max_tokens=max_tokens)
+    shard_addresses = None
+    if shards:
+        shard_addresses = [addr.strip() for addr in shards.split(",")]
+
+    run_inference(
+        prompt=prompt,
+        shard_addresses=shard_addresses,
+        master=master,
+        service_name=service,
+        max_tokens=max_tokens,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Up command — one-command deployment
+# ---------------------------------------------------------------------------
+
+@app.command("up")
+def up(
+    model: str = typer.Argument(
+        ...,
+        help="HuggingFace model ID or local path (e.g. Qwen/Qwen2.5-7B-Instruct).",
+    ),
+    master: str = typer.Option(
+        "localhost:10500",
+        "--master",
+        "-m",
+        help="Master address (host:port).",
+    ),
+    policy: str = typer.Option(
+        "default",
+        "--policy",
+        "-p",
+        help="Scheduling policy (default, latency-first, memory-balanced).",
+    ),
+    dtype: str = typer.Option(
+        "float16",
+        "--dtype",
+        "-d",
+        help="Weight dtype.",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        "-f",
+        help="Regenerate configs even if they exist.",
+    ),
+    deploy_shards: bool = typer.Option(
+        False,
+        "--deploy",
+        help="Also deploy the plan (start shards on workers).",
+    ),
+) -> None:
+    """One-command deployment: auto-generate configs, plan, and optionally deploy.
+
+    This chains together: service init → cluster snapshot → plan → deploy.
+    Generated files go to .edgeshard/ (gitignored).
+
+    Example:
+        edgeshard up Qwen/Qwen2.5-7B-Instruct
+        edgeshard up Qwen/Qwen2.5-7B-Instruct --deploy
+        edgeshard up Qwen/Qwen2.5-7B-Instruct --policy latency-first
+    """
+    from pathlib import Path
+
+    from edgeshard.cli.cluster_cmd import export_cluster_snapshot
+    from edgeshard.cli.plan_cmd import generate_plan
+    from edgeshard.cli.service_cmd import init_service
+
+    config_dir = Path(".edgeshard")
+    service_yaml = config_dir / "service.yaml"
+    cluster_yaml = config_dir / "cluster.yaml"
+    plan_yaml = config_dir / "plan.yaml"
+
+    console.print("[bold]EdgeShard Up[/bold]")
+    console.print(f"[dim]Model: {model}[/dim]")
+    console.print()
+
+    total_steps = 4 if deploy_shards else 3
+    step = 1
+
+    # Step 1: Generate service.yaml if needed
+    if not service_yaml.exists() or force:
+        console.print(f"[cyan]Step {step}/{total_steps}:[/cyan] Generating service.yaml...")
+        init_service(
+            model=model,
+            output=str(service_yaml),
+            dtype=dtype,
+            policy=policy,
+            force=True,
+        )
+        console.print()
+    else:
+        console.print(f"[cyan]Step {step}/{total_steps}:[/cyan] Using existing {service_yaml}")
+    step += 1
+
+    # Step 2: Export cluster snapshot
+    console.print(f"[cyan]Step {step}/{total_steps}:[/cyan] Exporting cluster snapshot...")
+    try:
+        export_cluster_snapshot(
+            master_address=master,
+            output_path=str(cluster_yaml),
+        )
+        console.print()
+    except Exception as e:
+        console.print(f"[red]Failed to export cluster: {e}[/red]")
+        console.print("[yellow]Is the Master running? Try: edgeshard master start[/yellow]")
+        raise SystemExit(1)
+    step += 1
+
+    # Step 3: Generate plan
+    console.print(f"[cyan]Step {step}/{total_steps}:[/cyan] Generating placement plan...")
+    generate_plan(
+        service_yaml=str(service_yaml),
+        output_path=str(plan_yaml),
+        master=None,
+        cluster_yaml=str(cluster_yaml),
+    )
+    step += 1
+
+    # Step 4: Deploy (optional)
+    if deploy_shards:
+        console.print()
+        console.print(f"[cyan]Step {step}/{total_steps}:[/cyan] Deploying shards to workers...")
+        from edgeshard.cli.deploy_cmd import deploy_service
+
+        try:
+            deploy_service(
+                plan_yaml=str(plan_yaml),
+                master=master,
+                wait=True,
+                timeout=120.0,
+            )
+        except SystemExit:
+            console.print("[red]Deployment failed[/red]")
+            raise
+    else:
+        console.print()
+        console.print("[bold green]Deployment plan ready![/bold green]")
+        console.print()
+        console.print("Generated files:")
+        console.print(f"  [dim]{service_yaml}[/dim]")
+        console.print(f"  [dim]{cluster_yaml}[/dim]")
+        console.print(f"  [bold]{plan_yaml}[/bold]")
+        console.print()
+        console.print("[dim]Next steps:[/dim]")
+        console.print(f"  [dim]# Deploy shards to workers[/dim]")
+        console.print(f"  [dim]edgeshard deploy {plan_yaml}[/dim]")
+        console.print()
+        console.print(f"  [dim]# Or deploy directly with --deploy flag[/dim]")
+        console.print(f"  [dim]edgeshard up {model} --deploy[/dim]")

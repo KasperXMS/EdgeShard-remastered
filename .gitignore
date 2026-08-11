@@ -42,6 +42,9 @@ Thumbs.db
 *.sqlite3
 edgeshard_state/
 
+# EdgeShard generated configs (auto-generated, not committed)
+.edgeshard/
+
 # Model caches
 models_cache/
 hf_cache/

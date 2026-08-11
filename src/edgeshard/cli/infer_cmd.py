@@ -11,30 +11,66 @@ console = Console()
 
 def run_inference(
     prompt: str,
-    shard_addresses: list[str],
+    shard_addresses: list[str] | None = None,
+    master: str = "localhost:10500",
+    service_name: str | None = None,
     max_tokens: int = 100,
 ) -> None:
     """Run distributed inference across multiple shards.
 
     Args:
         prompt: Input prompt text.
-        shard_addresses: List of shard gRPC addresses.
+        shard_addresses: List of shard gRPC addresses. If None, auto-discover from Master.
+        master: Master gRPC address for auto-discovery.
+        service_name: Service name to query. If None, uses any deployed service.
         max_tokens: Maximum tokens to generate.
     """
+    from edgeshard._grpc import edgeshard_pb2, edgeshard_pb2_grpc
     from edgeshard.common.logging import setup_logging
-    from edgeshard.runtime.pipeline import PipelineOrchestrator, ShardEndpoint
-    from edgeshard.runtime.pipeline_decoder import PipelineDecoder
-    from edgeshard.runtime.decoder import GenerationConfig
-    from edgeshard.transport.grpc_transport import GrpcTensorTransport
 
     setup_logging(level="INFO", component="infer")
+
+    # Auto-discover shards from Master if not specified
+    if shard_addresses is None:
+        console.print(f"[cyan]Auto-discovering shards from Master at {master}...[/cyan]")
+        try:
+            import grpc
+
+            channel = grpc.insecure_channel(master)
+            stub = edgeshard_pb2_grpc.WorkerServiceStub(channel)
+
+            response = stub.GetShardEndpoints(
+                edgeshard_pb2.GetShardEndpointsRequest(
+                    service_name=service_name or "",
+                )
+            )
+            channel.close()
+
+            if not response.endpoints:
+                console.print("[red]Error: No deployed shards found.[/red]")
+                console.print("[yellow]Did you run `edgeshard deploy` first?[/yellow]")
+                raise SystemExit(1)
+
+            shard_addresses = [ep.data_address for ep in response.endpoints]
+            console.print(f"[green]Found {len(shard_addresses)} shard(s) in service '{response.service_name}'[/green]")
+            for ep in response.endpoints:
+                console.print(
+                    f"  [dim]{ep.shard_id}: {ep.data_address} "
+                    f"(layers {ep.layer_start}:{ep.layer_end}, {ep.device})[/dim]"
+                )
+            console.print()
+
+        except Exception as e:
+            console.print(f"[red]Error discovering shards from Master: {e}[/red]")
+            console.print("[yellow]Is the Master running? Or specify --shards manually.[/yellow]")
+            raise SystemExit(1)
 
     console.print(f"[bold]Running distributed inference[/bold]")
     console.print(f"  Prompt: {prompt}")
     console.print(f"  Shards: {shard_addresses}")
     console.print(f"  Max tokens: {max_tokens}")
 
-    # For now, we assume all shards are local (in-process) for testing
+    # For now, remote inference is a placeholder
     # In a real deployment, each shard would be a separate process
     # and we'd connect via gRPC
 

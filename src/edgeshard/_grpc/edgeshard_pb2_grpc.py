@@ -93,6 +93,31 @@ class WorkerServiceStub:
                 request_serializer=edgeshard__pb2.ApplyPlacementRequest.SerializeToString,
                 response_deserializer=edgeshard__pb2.ApplyPlacementResponse.FromString,
                 _registered_method=True)
+        self.StartShard = channel.unary_unary(
+                '/edgeshard.WorkerService/StartShard',
+                request_serializer=edgeshard__pb2.StartShardRequest.SerializeToString,
+                response_deserializer=edgeshard__pb2.StartShardResponse.FromString,
+                _registered_method=True)
+        self.StopShard = channel.unary_unary(
+                '/edgeshard.WorkerService/StopShard',
+                request_serializer=edgeshard__pb2.StopShardRequest.SerializeToString,
+                response_deserializer=edgeshard__pb2.StopShardResponse.FromString,
+                _registered_method=True)
+        self.ListShards = channel.unary_unary(
+                '/edgeshard.WorkerService/ListShards',
+                request_serializer=edgeshard__pb2.ListShardsRequest.SerializeToString,
+                response_deserializer=edgeshard__pb2.ListShardsResponse.FromString,
+                _registered_method=True)
+        self.RegisterShards = channel.unary_unary(
+                '/edgeshard.WorkerService/RegisterShards',
+                request_serializer=edgeshard__pb2.RegisterShardsRequest.SerializeToString,
+                response_deserializer=edgeshard__pb2.RegisterShardsResponse.FromString,
+                _registered_method=True)
+        self.GetShardEndpoints = channel.unary_unary(
+                '/edgeshard.WorkerService/GetShardEndpoints',
+                request_serializer=edgeshard__pb2.GetShardEndpointsRequest.SerializeToString,
+                response_deserializer=edgeshard__pb2.GetShardEndpointsResponse.FromString,
+                _registered_method=True)
 
 
 class WorkerServiceServicer:
@@ -173,6 +198,38 @@ class WorkerServiceServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def StartShard(self, request, context):
+        """Shard lifecycle (M8)
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def StopShard(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ListShards(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def RegisterShards(self, request, context):
+        """Shard endpoints for inference (M8)
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetShardEndpoints(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_WorkerServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -230,6 +287,31 @@ def add_WorkerServiceServicer_to_server(servicer, server):
                     servicer.ApplyPlacement,
                     request_deserializer=edgeshard__pb2.ApplyPlacementRequest.FromString,
                     response_serializer=edgeshard__pb2.ApplyPlacementResponse.SerializeToString,
+            ),
+            'StartShard': grpc.unary_unary_rpc_method_handler(
+                    servicer.StartShard,
+                    request_deserializer=edgeshard__pb2.StartShardRequest.FromString,
+                    response_serializer=edgeshard__pb2.StartShardResponse.SerializeToString,
+            ),
+            'StopShard': grpc.unary_unary_rpc_method_handler(
+                    servicer.StopShard,
+                    request_deserializer=edgeshard__pb2.StopShardRequest.FromString,
+                    response_serializer=edgeshard__pb2.StopShardResponse.SerializeToString,
+            ),
+            'ListShards': grpc.unary_unary_rpc_method_handler(
+                    servicer.ListShards,
+                    request_deserializer=edgeshard__pb2.ListShardsRequest.FromString,
+                    response_serializer=edgeshard__pb2.ListShardsResponse.SerializeToString,
+            ),
+            'RegisterShards': grpc.unary_unary_rpc_method_handler(
+                    servicer.RegisterShards,
+                    request_deserializer=edgeshard__pb2.RegisterShardsRequest.FromString,
+                    response_serializer=edgeshard__pb2.RegisterShardsResponse.SerializeToString,
+            ),
+            'GetShardEndpoints': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetShardEndpoints,
+                    request_deserializer=edgeshard__pb2.GetShardEndpointsRequest.FromString,
+                    response_serializer=edgeshard__pb2.GetShardEndpointsResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -533,6 +615,141 @@ class WorkerService:
             '/edgeshard.WorkerService/ApplyPlacement',
             edgeshard__pb2.ApplyPlacementRequest.SerializeToString,
             edgeshard__pb2.ApplyPlacementResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def StartShard(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/edgeshard.WorkerService/StartShard',
+            edgeshard__pb2.StartShardRequest.SerializeToString,
+            edgeshard__pb2.StartShardResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def StopShard(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/edgeshard.WorkerService/StopShard',
+            edgeshard__pb2.StopShardRequest.SerializeToString,
+            edgeshard__pb2.StopShardResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ListShards(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/edgeshard.WorkerService/ListShards',
+            edgeshard__pb2.ListShardsRequest.SerializeToString,
+            edgeshard__pb2.ListShardsResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def RegisterShards(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/edgeshard.WorkerService/RegisterShards',
+            edgeshard__pb2.RegisterShardsRequest.SerializeToString,
+            edgeshard__pb2.RegisterShardsResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetShardEndpoints(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/edgeshard.WorkerService/GetShardEndpoints',
+            edgeshard__pb2.GetShardEndpointsRequest.SerializeToString,
+            edgeshard__pb2.GetShardEndpointsResponse.FromString,
             options,
             channel_credentials,
             insecure,
