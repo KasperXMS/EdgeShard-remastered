@@ -1,0 +1,15 @@
+service_name: qwen2.5-7b-instruct
+version: 1
+model: Qwen/Qwen2.5-7B-Instruct
+model_revision: main
+dtype: float16
+shards:
+- shard_index: 0
+  worker_id: w-08173e0282b2
+  layer_start: 0
+  layer_end: 28
+  device: cuda:0
+metadata:
+  total_layers: 28
+  num_shards: 1
+  num_workers: 1

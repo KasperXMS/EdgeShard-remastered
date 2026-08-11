@@ -1,0 +1,37 @@
+source_worker_id: w-08173e0282b2
+workers:
+- worker_id: w-08173e0282b2
+  hostname: super
+  available_memory_mb: 55998
+  cpu_count: 32
+  status: online
+  devices:
+  - device_id: cuda:0
+    device_type: cuda
+    name: NVIDIA GeForce RTX 4090
+    total_memory_mb: 24564
+    compute_capability: '8.9'
+  - device_id: cuda:1
+    device_type: cuda
+    name: NVIDIA GeForce RTX 4090
+    total_memory_mb: 24564
+    compute_capability: '8.9'
+  - device_id: cpu:0
+    device_type: cpu
+    name: x86_64
+    total_memory_mb: 64077
+- worker_id: w-3a40f425cb8f
+  hostname: Z790M-AORUS-ELITE-AX
+  available_memory_mb: 51860
+  cpu_count: 32
+  status: online
+  devices:
+  - device_id: cuda:0
+    device_type: cuda
+    name: NVIDIA GeForce RTX 4090
+    total_memory_mb: 24564
+    compute_capability: '8.9'
+  - device_id: cpu:0
+    device_type: cpu
+    name: x86_64
+    total_memory_mb: 64060
