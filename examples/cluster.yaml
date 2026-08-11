@@ -1,0 +1,55 @@
+# Example cluster topology for offline planning
+# Use with: edgeshard plan service.yaml --cluster-yaml cluster.yaml
+
+source_worker_id: w-001
+
+workers:
+  - worker_id: w-001
+    hostname: gpu-workstation
+    available_memory_mb: 65536
+    cpu_count: 16
+    status: online
+    devices:
+      - device_id: cuda:0
+        device_type: cuda
+        name: NVIDIA GeForce RTX 4090
+        total_memory_mb: 24576
+        compute_capability: "8.9"
+
+  - worker_id: w-002
+    hostname: edge-jetson-1
+    available_memory_mb: 32768
+    cpu_count: 8
+    status: online
+    devices:
+      - device_id: jetson:0
+        device_type: jetson
+        name: NVIDIA Jetson AGX Orin
+        total_memory_mb: 32768
+
+  - worker_id: w-003
+    hostname: edge-jetson-2
+    available_memory_mb: 16384
+    cpu_count: 6
+    status: online
+    devices:
+      - device_id: jetson:0
+        device_type: jetson
+        name: NVIDIA Jetson Orin NX
+        total_memory_mb: 16384
+
+# Bandwidth between workers (MB/s)
+# 1 Gbps Ethernet ≈ 125 MB/s
+# 100 Mbps Ethernet ≈ 12.5 MB/s
+# WiFi 5 ≈ 50 MB/s
+# WiFi 6 ≈ 100 MB/s
+bandwidth_matrix:
+  - from: w-001
+    to: w-002
+    bandwidth_mb_per_s: 125.0
+  - from: w-001
+    to: w-003
+    bandwidth_mb_per_s: 125.0
+  - from: w-002
+    to: w-003
+    bandwidth_mb_per_s: 100.0

@@ -38,13 +38,56 @@ class ClusterSnapshot:
     """Immutable snapshot of all Workers and their resources.
 
     This is the input to the Scheduler — never raw monitoring data.
+
+    Attributes:
+        workers: List of WorkerState snapshots.
+        timestamp: Unix timestamp when snapshot was taken.
+        bandwidth_matrix: Maps (worker_id_a, worker_id_b) → bandwidth in MB/s.
+            Populated from M5 NetworkMetrics. Defaults to 100 MB/s for
+            unknown pairs (conservative estimate).
+        source_worker_id: The worker where input tokens originate.
+            The scheduler enforces a privacy constraint: the first model
+            layer must be placed on this worker. If None, the first
+            worker in the list is used as source.
     """
 
     workers: list[WorkerState] = field(default_factory=list)
     timestamp: float = 0.0
+    bandwidth_matrix: dict[tuple[str, str], float] = field(default_factory=dict)
+    source_worker_id: str | None = None
 
     def total_memory_mb(self) -> int:
         return sum(w.available_memory_mb for w in self.workers)
+
+    def get_bandwidth(self, worker_a: str, worker_b: str) -> float:
+        """Get bandwidth between two workers in MB/s.
+
+        Returns the measured bandwidth if available, otherwise a
+        conservative default of 100 MB/s.
+        """
+        if worker_a == worker_b:
+            return float("inf")  # Same worker, no network transfer
+        key = (worker_a, worker_b)
+        rev_key = (worker_b, worker_a)
+        bw = self.bandwidth_matrix.get(key)
+        if bw is not None:
+            return bw
+        bw = self.bandwidth_matrix.get(rev_key)
+        if bw is not None:
+            return bw
+        return 100.0  # Conservative default: 100 MB/s
+
+    def get_source_worker(self) -> str:
+        """Get the source worker ID.
+
+        Returns the explicitly set source_worker_id, or the first
+        worker in the list if not set.
+        """
+        if self.source_worker_id is not None:
+            return self.source_worker_id
+        if self.workers:
+            return str(self.workers[0].worker_id)
+        raise ValueError("ClusterSnapshot has no workers")
 
 
 @dataclass

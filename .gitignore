@@ -48,3 +48,6 @@ hf_cache/
 
 # Docker
 docker-compose.override.yml
+
+# Internal Documents
+docs/internal/

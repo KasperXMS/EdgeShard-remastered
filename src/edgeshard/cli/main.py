@@ -5,7 +5,9 @@ Usage:
     edgeshard worker start --master 192.168.1.10:10500
     edgeshard node list
     edgeshard profile run Qwen/Qwen2.5-7B-Instruct
-    edgeshard plan service.yaml
+    edgeshard service init Qwen/Qwen2.5-7B-Instruct
+    edgeshard cluster snapshot -o cluster.yaml
+    edgeshard plan service.yaml --cluster-yaml cluster.yaml
     edgeshard service deploy service.yaml
 """
 
@@ -20,6 +22,7 @@ from edgeshard._version import __version__
 master_app = typer.Typer(help="Master node operations.")
 worker_app = typer.Typer(help="Worker node operations.")
 node_app = typer.Typer(help="Cluster node discovery.")
+cluster_app = typer.Typer(help="Cluster topology and snapshot operations.")
 profile_app = typer.Typer(help="Model profiling operations.")
 service_app = typer.Typer(help="Service lifecycle management.")
 shard_app = typer.Typer(help="Shard process operations.")
@@ -34,6 +37,7 @@ app = typer.Typer(
 app.add_typer(master_app, name="master")
 app.add_typer(worker_app, name="worker")
 app.add_typer(node_app, name="node")
+app.add_typer(cluster_app, name="cluster")
 app.add_typer(profile_app, name="profile")
 app.add_typer(service_app, name="service")
 app.add_typer(shard_app, name="shard")
@@ -139,6 +143,36 @@ def node_metrics(
 
 
 # ---------------------------------------------------------------------------
+# Cluster commands
+# ---------------------------------------------------------------------------
+
+@cluster_app.command("snapshot")
+def cluster_snapshot(
+    output: str = typer.Option(
+        "cluster.yaml",
+        "--output",
+        "-o",
+        help="Output path for the cluster YAML.",
+    ),
+    master: str = typer.Option(
+        "localhost:10500",
+        "--master",
+        "-m",
+        help="Master address (host:port).",
+    ),
+) -> None:
+    """Export current cluster state to a YAML file for offline planning.
+
+    Connects to a running Master, fetches worker information including
+    devices, metrics, and network topology, then writes a cluster.yaml
+    that can be used with `edgeshard plan`.
+    """
+    from edgeshard.cli.cluster_cmd import export_cluster_snapshot
+
+    export_cluster_snapshot(master_address=master, output_path=output)
+
+
+# ---------------------------------------------------------------------------
 # Profile commands
 # ---------------------------------------------------------------------------
 
@@ -195,11 +229,28 @@ def plan_generate(
         "-o",
         help="Output path for the generated PlacementPlan.",
     ),
+    master: str = typer.Option(
+        None,
+        "--master",
+        "-m",
+        help="Master address (host:port) for live cluster data.",
+    ),
+    cluster_yaml: str = typer.Option(
+        None,
+        "--cluster-yaml",
+        "-c",
+        help="Path to cluster YAML for offline planning.",
+    ),
 ) -> None:
     """Generate an immutable PlacementPlan from a service specification."""
     from edgeshard.cli.plan_cmd import generate_plan
 
-    generate_plan(service_yaml=service_yaml, output_path=output)
+    generate_plan(
+        service_yaml=service_yaml,
+        output_path=output,
+        master=master,
+        cluster_yaml=cluster_yaml,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -245,6 +296,66 @@ def service_stop(
     from edgeshard.cli.service_cmd import stop_service
 
     stop_service(name)
+
+
+@service_app.command("init")
+def service_init(
+    model: str = typer.Argument(
+        ...,
+        help="HuggingFace model ID or local path (e.g. Qwen/Qwen2.5-7B-Instruct).",
+    ),
+    output: str = typer.Option(
+        "service.yaml",
+        "--output",
+        "-o",
+        help="Output path for the generated service YAML.",
+    ),
+    name: str = typer.Option(
+        None,
+        "--name",
+        "-n",
+        help="Service name (auto-generated from model if omitted).",
+    ),
+    dtype: str = typer.Option(
+        "float16",
+        "--dtype",
+        "-d",
+        help="Weight dtype (float16, bfloat16, float32).",
+    ),
+    max_seq_len: int = typer.Option(
+        4096,
+        "--max-seq-len",
+        help="Maximum sequence length.",
+    ),
+    policy: str = typer.Option(
+        "default",
+        "--policy",
+        "-p",
+        help="Scheduling policy (default, latency-first, memory-balanced).",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        "-f",
+        help="Overwrite existing file.",
+    ),
+) -> None:
+    """Generate a service.yaml template from a model name.
+
+    Auto-fills sensible defaults based on the model's known architecture.
+    For unknown models, uses generic conservative defaults.
+    """
+    from edgeshard.cli.service_cmd import init_service
+
+    init_service(
+        model=model,
+        output=output,
+        name=name,
+        dtype=dtype,
+        max_seq_len=max_seq_len,
+        policy=policy,
+        force=force,
+    )
 
 
 # ---------------------------------------------------------------------------

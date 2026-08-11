@@ -88,6 +88,11 @@ class WorkerServiceStub:
                 request_serializer=edgeshard__pb2.ProfileRequest.SerializeToString,
                 response_deserializer=edgeshard__pb2.ProfileResponse.FromString,
                 _registered_method=True)
+        self.ApplyPlacement = channel.unary_unary(
+                '/edgeshard.WorkerService/ApplyPlacement',
+                request_serializer=edgeshard__pb2.ApplyPlacementRequest.SerializeToString,
+                response_deserializer=edgeshard__pb2.ApplyPlacementResponse.FromString,
+                _registered_method=True)
 
 
 class WorkerServiceServicer:
@@ -161,6 +166,13 @@ class WorkerServiceServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def ApplyPlacement(self, request, context):
+        """Placement (M7)
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_WorkerServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -213,6 +225,11 @@ def add_WorkerServiceServicer_to_server(servicer, server):
                     servicer.Profile,
                     request_deserializer=edgeshard__pb2.ProfileRequest.FromString,
                     response_serializer=edgeshard__pb2.ProfileResponse.SerializeToString,
+            ),
+            'ApplyPlacement': grpc.unary_unary_rpc_method_handler(
+                    servicer.ApplyPlacement,
+                    request_deserializer=edgeshard__pb2.ApplyPlacementRequest.FromString,
+                    response_serializer=edgeshard__pb2.ApplyPlacementResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -489,6 +506,33 @@ class WorkerService:
             '/edgeshard.WorkerService/Profile',
             edgeshard__pb2.ProfileRequest.SerializeToString,
             edgeshard__pb2.ProfileResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ApplyPlacement(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/edgeshard.WorkerService/ApplyPlacement',
+            edgeshard__pb2.ApplyPlacementRequest.SerializeToString,
+            edgeshard__pb2.ApplyPlacementResponse.FromString,
             options,
             channel_credentials,
             insecure,
