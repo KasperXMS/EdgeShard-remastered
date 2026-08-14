@@ -3,7 +3,7 @@
 import grpc
 import warnings
 
-from edgeshard._grpc import shard_pb2 as shard__pb2
+import edgeshard._grpc.shard_pb2 as shard__pb2
 
 GRPC_GENERATED_VERSION = '1.83.0'
 GRPC_VERSION = grpc.__version__
@@ -50,6 +50,26 @@ class ShardServiceStub:
                 request_serializer=shard__pb2.RecvTensorRequest.SerializeToString,
                 response_deserializer=shard__pb2.SendTensorResponse.FromString,
                 _registered_method=True)
+        self.CreateSession = channel.unary_unary(
+                '/edgeshard.shard.ShardService/CreateSession',
+                request_serializer=shard__pb2.CreateSessionRequest.SerializeToString,
+                response_deserializer=shard__pb2.CreateSessionResponse.FromString,
+                _registered_method=True)
+        self.RunPrefill = channel.unary_unary(
+                '/edgeshard.shard.ShardService/RunPrefill',
+                request_serializer=shard__pb2.InferenceRequest.SerializeToString,
+                response_deserializer=shard__pb2.InferenceResponse.FromString,
+                _registered_method=True)
+        self.RunDecode = channel.unary_unary(
+                '/edgeshard.shard.ShardService/RunDecode',
+                request_serializer=shard__pb2.InferenceRequest.SerializeToString,
+                response_deserializer=shard__pb2.InferenceResponse.FromString,
+                _registered_method=True)
+        self.ReleaseSession = channel.unary_unary(
+                '/edgeshard.shard.ShardService/ReleaseSession',
+                request_serializer=shard__pb2.ReleaseSessionRequest.SerializeToString,
+                response_deserializer=shard__pb2.ReleaseSessionResponse.FromString,
+                _registered_method=True)
 
 
 class ShardServiceServicer:
@@ -57,22 +77,45 @@ class ShardServiceServicer:
     """
 
     def SendTensor(self, request, context):
-        """Send tensor to this shard
+        """Tensor transfer (inter-shard data plane)
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
     def RecvTensor(self, request, context):
-        """Receive tensor from this shard (pull model)
-        """
+        """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
     def Ping(self, request, context):
-        """Health check
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def CreateSession(self, request, context):
+        """Inference (remote client → shard)
         """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def RunPrefill(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def RunDecode(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ReleaseSession(self, request, context):
+        """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
@@ -94,6 +137,26 @@ def add_ShardServiceServicer_to_server(servicer, server):
                     servicer.Ping,
                     request_deserializer=shard__pb2.RecvTensorRequest.FromString,
                     response_serializer=shard__pb2.SendTensorResponse.SerializeToString,
+            ),
+            'CreateSession': grpc.unary_unary_rpc_method_handler(
+                    servicer.CreateSession,
+                    request_deserializer=shard__pb2.CreateSessionRequest.FromString,
+                    response_serializer=shard__pb2.CreateSessionResponse.SerializeToString,
+            ),
+            'RunPrefill': grpc.unary_unary_rpc_method_handler(
+                    servicer.RunPrefill,
+                    request_deserializer=shard__pb2.InferenceRequest.FromString,
+                    response_serializer=shard__pb2.InferenceResponse.SerializeToString,
+            ),
+            'RunDecode': grpc.unary_unary_rpc_method_handler(
+                    servicer.RunDecode,
+                    request_deserializer=shard__pb2.InferenceRequest.FromString,
+                    response_serializer=shard__pb2.InferenceResponse.SerializeToString,
+            ),
+            'ReleaseSession': grpc.unary_unary_rpc_method_handler(
+                    servicer.ReleaseSession,
+                    request_deserializer=shard__pb2.ReleaseSessionRequest.FromString,
+                    response_serializer=shard__pb2.ReleaseSessionResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -178,6 +241,114 @@ class ShardService:
             '/edgeshard.shard.ShardService/Ping',
             shard__pb2.RecvTensorRequest.SerializeToString,
             shard__pb2.SendTensorResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def CreateSession(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/edgeshard.shard.ShardService/CreateSession',
+            shard__pb2.CreateSessionRequest.SerializeToString,
+            shard__pb2.CreateSessionResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def RunPrefill(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/edgeshard.shard.ShardService/RunPrefill',
+            shard__pb2.InferenceRequest.SerializeToString,
+            shard__pb2.InferenceResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def RunDecode(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/edgeshard.shard.ShardService/RunDecode',
+            shard__pb2.InferenceRequest.SerializeToString,
+            shard__pb2.InferenceResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ReleaseSession(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/edgeshard.shard.ShardService/ReleaseSession',
+            shard__pb2.ReleaseSessionRequest.SerializeToString,
+            shard__pb2.ReleaseSessionResponse.FromString,
             options,
             channel_credentials,
             insecure,

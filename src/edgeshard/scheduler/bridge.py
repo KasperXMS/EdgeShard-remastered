@@ -53,10 +53,29 @@ def worker_records_to_cluster_snapshot(
                     device_type=pb_dev.device_type,
                     name=pb_dev.name,
                     total_memory_mb=pb_dev.total_memory_mb,
+                    available_memory_mb=0,  # Updated below from metrics
                     compute_capability=pb_dev.compute_capability or None,
                     properties=dict(pb_dev.properties),
                 )
             )
+
+        # Populate per-device available memory from latest heartbeat metrics
+        # This is the actual free memory, not total — critical for scheduling
+        # when other processes (e.g. miners) are using GPU memory
+        for dev_info in devices:
+            if dev_info.device_type == "cuda":
+                # Extract GPU index from device_id (format: "cuda:0")
+                try:
+                    gpu_idx = int(dev_info.device_id.split(":")[1])
+                except (IndexError, ValueError):
+                    continue
+                for dm in rec.device_metrics:
+                    if dm.device_id == dev_info.device_id and dm.HasField("gpu_metrics"):
+                        dev_info.available_memory_mb = dm.gpu_metrics.free_memory_mb
+                        break
+            elif dev_info.device_type in ("cpu", "jetson"):
+                # For CPU/Jetson, use system available memory
+                dev_info.available_memory_mb = rec.available_memory_mb
 
         worker_state = WorkerState(
             worker_id=rec.worker_id,
@@ -152,6 +171,7 @@ def cluster_snapshot_from_yaml(path: str) -> ClusterSnapshot:
                 device_type=d.get("device_type", "cpu"),
                 name=d.get("name", ""),
                 total_memory_mb=d.get("total_memory_mb", 0),
+                available_memory_mb=d.get("available_memory_mb", 0),
                 compute_capability=d.get("compute_capability"),
             )
             for d in w_data.get("devices", [])

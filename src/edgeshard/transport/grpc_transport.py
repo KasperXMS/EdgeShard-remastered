@@ -246,6 +246,7 @@ class ShardServer:
     """gRPC server for a shard — receives tensors from other shards.
 
     Each shard runs this server to accept incoming tensor transfers.
+    Optionally supports inference RPCs when a ModelShard is provided.
     """
 
     def __init__(
@@ -253,12 +254,13 @@ class ShardServer:
         shard_id: str,
         host: str = "0.0.0.0",
         port: int = 50100,
+        inference_shard: "ModelShard | None" = None,
     ) -> None:
         self._shard_id = shard_id
         self._host = host
         self._port = port
         self._server: grpc.aio.Server | None = None
-        self._servicer = ShardServicer(shard_id)
+        self._servicer = ShardServicer(shard_id, inference_shard=inference_shard)
 
     async def start(self) -> None:
         """Start the shard gRPC server."""
@@ -285,11 +287,23 @@ class ShardServer:
 
 
 class ShardServicer(shard_pb2_grpc.ShardServiceServicer):
-    """gRPC servicer for shard data plane."""
+    """gRPC servicer for shard data plane.
 
-    def __init__(self, shard_id: str) -> None:
+    Handles:
+    - SendTensor / RecvTensor: inter-shard tensor transfer
+    - CreateSession / RunPrefill / RunDecode / ReleaseSession: remote inference
+    """
+
+    def __init__(
+        self,
+        shard_id: str,
+        inference_shard: "ModelShard | None" = None,
+    ) -> None:
         self._shard_id = shard_id
         self._recv_buffers: dict[str, torch.Tensor] = {}  # session_id -> tensor
+        self._inference_shard = inference_shard
+
+    # ----- Tensor transfer (inter-shard data plane) -----
 
     async def SendTensor(
         self,
@@ -349,3 +363,121 @@ class ShardServicer(shard_pb2_grpc.ShardServiceServicer):
     ) -> shard_pb2.SendTensorResponse:
         """Health check."""
         return shard_pb2.SendTensorResponse(success=True, message=f"pong from {self._shard_id}")
+
+    # ----- Inference RPCs -----
+
+    async def CreateSession(
+        self,
+        request: shard_pb2.CreateSessionRequest,
+        context: grpc.ServicerContext,
+    ) -> shard_pb2.CreateSessionResponse:
+        """Create an inference session on this shard."""
+        if self._inference_shard is None:
+            return shard_pb2.CreateSessionResponse(
+                success=False, message="Inference not enabled on this shard"
+            )
+        try:
+            from edgeshard.common.identifiers import SessionId
+            sid = SessionId(request.session_id)
+            self._inference_shard.create_session(
+                sid,
+                batch_size=request.batch_size or 1,
+                max_seq_len=request.max_seq_len or 4096,
+            )
+            return shard_pb2.CreateSessionResponse(
+                success=True, message=f"Session {request.session_id} created"
+            )
+        except Exception as e:
+            logger.error(f"CreateSession error: {e}")
+            return shard_pb2.CreateSessionResponse(success=False, message=str(e))
+
+    async def RunPrefill(
+        self,
+        request: shard_pb2.InferenceRequest,
+        context: grpc.ServicerContext,
+    ) -> shard_pb2.InferenceResponse:
+        """Run prefill on this shard."""
+        if self._inference_shard is None:
+            return shard_pb2.InferenceResponse(
+                success=False, message="Inference not enabled on this shard"
+            )
+        try:
+            from edgeshard.common.identifiers import SessionId
+            sid = SessionId(request.session_id)
+            device = self._inference_shard._adapter.get_device()
+
+            input_ids = None
+            hidden_states = None
+
+            if self._inference_shard.is_first_shard and request.HasField("input_ids"):
+                input_ids = message_to_tensor(request.input_ids, device)
+            elif not self._inference_shard.is_first_shard and request.HasField("hidden_states"):
+                hidden_states = message_to_tensor(request.hidden_states, device)
+
+            output = await self._inference_shard.prefill(
+                sid, input_ids=input_ids, hidden_states_input=hidden_states
+            )
+
+            output_msg = tensor_to_message(output, request.session_id)
+            return shard_pb2.InferenceResponse(
+                success=True, message="OK", output=output_msg
+            )
+        except Exception as e:
+            logger.error(f"RunPrefill error: {e}")
+            return shard_pb2.InferenceResponse(success=False, message=str(e))
+
+    async def RunDecode(
+        self,
+        request: shard_pb2.InferenceRequest,
+        context: grpc.ServicerContext,
+    ) -> shard_pb2.InferenceResponse:
+        """Run one decode step on this shard."""
+        if self._inference_shard is None:
+            return shard_pb2.InferenceResponse(
+                success=False, message="Inference not enabled on this shard"
+            )
+        try:
+            from edgeshard.common.identifiers import SessionId
+            sid = SessionId(request.session_id)
+            device = self._inference_shard._adapter.get_device()
+
+            token_id = None
+            hidden_states = None
+
+            if self._inference_shard.is_first_shard:
+                token_id = request.token_id
+            elif request.HasField("hidden_states"):
+                hidden_states = message_to_tensor(request.hidden_states, device)
+
+            output = await self._inference_shard.decode(
+                sid, token_id=token_id, hidden_states_input=hidden_states
+            )
+
+            output_msg = tensor_to_message(output, request.session_id)
+            return shard_pb2.InferenceResponse(
+                success=True, message="OK", output=output_msg
+            )
+        except Exception as e:
+            logger.error(f"RunDecode error: {e}")
+            return shard_pb2.InferenceResponse(success=False, message=str(e))
+
+    async def ReleaseSession(
+        self,
+        request: shard_pb2.ReleaseSessionRequest,
+        context: grpc.ServicerContext,
+    ) -> shard_pb2.ReleaseSessionResponse:
+        """Release an inference session."""
+        if self._inference_shard is None:
+            return shard_pb2.ReleaseSessionResponse(
+                success=False, message="Inference not enabled on this shard"
+            )
+        try:
+            from edgeshard.common.identifiers import SessionId
+            sid = SessionId(request.session_id)
+            self._inference_shard.release_session(sid)
+            return shard_pb2.ReleaseSessionResponse(
+                success=True, message=f"Session {request.session_id} released"
+            )
+        except Exception as e:
+            logger.error(f"ReleaseSession error: {e}")
+            return shard_pb2.ReleaseSessionResponse(success=False, message=str(e))

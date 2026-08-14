@@ -52,6 +52,21 @@ def main() -> None:
             print(result.stderr)
             sys.exit(1)
 
+    # Fix import paths in generated _grpc.py files
+    # The protoc generates "import xxx_pb2" but we need "import edgeshard._grpc.xxx_pb2"
+    for grpc_file in output_dir.glob("*_pb2_grpc.py"):
+        print(f"Fixing imports in {grpc_file.name}...")
+        content = grpc_file.read_text()
+        # Replace "import xxx_pb2 as" with "import edgeshard._grpc.xxx_pb2 as"
+        import re
+        content = re.sub(
+            r'^import (\w+_pb2) as',
+            r'import edgeshard._grpc.\1 as',
+            content,
+            flags=re.MULTILINE,
+        )
+        grpc_file.write_text(content)
+
     # Create __init__.py
     init_file = output_dir / "__init__.py"
     if not init_file.exists():

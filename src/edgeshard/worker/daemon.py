@@ -311,17 +311,40 @@ class WorkerDaemon:
             "pid": proc.pid,
         }
 
-        # Wait a bit for the shard to start
-        await asyncio.sleep(2.0)
+        # Poll for shard readiness — wait up to 60 seconds for model loading/download
+        ready = False
+        last_stderr = b""
+        for _ in range(60):
+            await asyncio.sleep(1.0)
 
-        # Check if process is still running
-        if proc.poll() is None:
+            # Check if process died
+            if proc.poll() is not None:
+                # Process exited — collect stderr
+                try:
+                    _, last_stderr = proc.communicate(timeout=2)
+                except Exception:
+                    last_stderr = b""
+                break
+
+            # Try to connect to the data port to verify shard is ready
+            try:
+                import socket
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(1.0)
+                result = sock.connect_ex(("127.0.0.1", data_port))
+                sock.close()
+                if result == 0:
+                    ready = True
+                    break
+            except Exception:
+                pass
+
+        if ready:
             self._shards[shard_id]["status"] = "ready"
-            logger.info(f"Shard {shard_id} started (PID: {proc.pid})")
+            logger.info(f"Shard {shard_id} started and ready (PID: {proc.pid})")
         else:
-            _, stderr = proc.communicate()
             self._shards[shard_id]["status"] = "failed"
-            error_msg = stderr.decode()[:500]
+            error_msg = last_stderr.decode(errors="replace")[:1000] if last_stderr else "Shard did not become ready within 60s"
             logger.error(f"Shard {shard_id} failed to start: {error_msg}")
             raise RuntimeError(f"Shard failed to start: {error_msg}")
 

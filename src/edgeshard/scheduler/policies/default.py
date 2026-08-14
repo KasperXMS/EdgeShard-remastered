@@ -184,8 +184,12 @@ def _build_device_slots(
                 if matched_profile is not None:
                     layer_fwd_ms = matched_profile.layer_forward_ms
 
-                # Memory budget: device total memory * safety margin
-                mem_budget = dev.total_memory_mb * _MEMORY_SAFETY_MARGIN
+                # Memory budget: use available (free) memory from heartbeat,
+                # fall back to total memory if not yet reported
+                if dev.available_memory_mb > 0:
+                    mem_budget = dev.available_memory_mb * _MEMORY_SAFETY_MARGIN
+                else:
+                    mem_budget = dev.total_memory_mb * _MEMORY_SAFETY_MARGIN
 
                 # Check if this device can hold at least 1 layer + KV cache
                 min_required = per_layer_mem + kv_cache_total

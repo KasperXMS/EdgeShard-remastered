@@ -68,6 +68,8 @@ class RemoteDeploymentBackend(DeploymentBackend):
         data_host: str = "0.0.0.0",
         data_port: int = 50100,
         master_address: str = "localhost:10500",
+        is_first: bool = False,
+        is_last: bool = False,
     ) -> ShardHandle:
         """Start a shard on a remote Worker via gRPC."""
         worker_id = str(shard_placement.worker_id)
@@ -85,10 +87,6 @@ class RemoteDeploymentBackend(DeploymentBackend):
         )
         self._shards[shard_id] = handle
 
-        # Determine if first/last shard
-        # For now, assume shard_index 0 is first, we'll need the plan to know last
-        is_first = shard_placement.shard_index == 0
-
         try:
             channel = self._get_channel(worker_id)
             stub = edgeshard_pb2_grpc.WorkerServiceStub(channel)
@@ -104,7 +102,7 @@ class RemoteDeploymentBackend(DeploymentBackend):
                 data_host=data_host,
                 data_port=data_port,
                 is_first_shard=is_first,
-                is_last_shard=False,  # Will be set correctly by caller
+                is_last_shard=is_last,
                 master_address=master_address,
             )
 

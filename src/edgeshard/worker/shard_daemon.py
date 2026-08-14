@@ -2,16 +2,17 @@
 
 A ShardDaemon:
 1. Loads a model subset (layer range)
-2. Starts a gRPC server for data-plane tensor transfers
+2. Starts a gRPC server for data-plane tensor transfers AND inference RPCs
 3. Optionally registers with a Master
-4. Waits for inference commands
+4. Waits for inference commands from remote clients
 
 Usage:
     edgeshard shard start \\
-        --model Qwen/Qwen2.5-7B-Instruct \\
-        --layers 0:16 \\
+        Qwen/Qwen2.5-7B-Instruct \\
         --shard-id shard-0 \\
-        --data-plane-port 50100
+        --layers 0:16 \\
+        --port 50100 \\
+        --first --last
 """
 
 from __future__ import annotations
@@ -98,11 +99,12 @@ class ShardDaemon:
             is_last_shard=self._is_last_shard,
         )
 
-        # Start data-plane server
+        # Start data-plane server WITH inference RPCs enabled
         self._server = ShardServer(
             shard_id=self._shard_id,
             host=self._data_plane_host,
             port=self._data_plane_port,
+            inference_shard=self._shard,
         )
         await self._server.start()
 
@@ -190,3 +192,61 @@ class ShardDaemon:
             f"Model not found: {model_path}. "
             f"Provide a valid local path or HuggingFace model ID."
         )
+
+
+def main() -> None:
+    """CLI entry point for shard daemon.
+
+    Usage:
+        python -m edgeshard.worker.shard_daemon \\
+            Qwen/Qwen2.5-7B-Instruct \\
+            --shard-id shard-0 \\
+            --layers 0:16 \\
+            --port 50100 \\
+            --first
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(description="EdgeShard Shard Daemon")
+    parser.add_argument("model", help="Model name or path")
+    parser.add_argument("--shard-id", required=True, help="Unique shard ID")
+    parser.add_argument("--layers", required=True, help="Layer range, e.g. 0:16")
+    parser.add_argument("--dtype", default="float16", help="Model dtype")
+    parser.add_argument("--host", default="0.0.0.0", help="Data plane host")
+    parser.add_argument("--port", type=int, default=50100, help="Data plane port")
+    parser.add_argument("--first", action="store_true", help="This is the first shard (has embedding)")
+    parser.add_argument("--last", action="store_true", help="This is the last shard (has LM head)")
+
+    args = parser.parse_args()
+
+    # Parse layer range
+    layer_parts = args.layers.split(":")
+    layer_start = int(layer_parts[0])
+    layer_end = int(layer_parts[1])
+
+    daemon = ShardDaemon(
+        shard_id=args.shard_id,
+        model_path=args.model,
+        layer_start=layer_start,
+        layer_end=layer_end,
+        dtype=args.dtype,
+        data_plane_host=args.host,
+        data_plane_port=args.port,
+        is_first_shard=args.first,
+        is_last_shard=args.last,
+    )
+
+    async def run() -> None:
+        await daemon.start()
+        logger.info(f"Shard daemon running. Press Ctrl+C to stop.")
+        try:
+            while True:
+                await asyncio.sleep(1)
+        except KeyboardInterrupt:
+            await daemon.stop()
+
+    asyncio.run(run())
+
+
+if __name__ == "__main__":
+    main()

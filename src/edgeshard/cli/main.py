@@ -476,6 +476,11 @@ def infer(
         "--service",
         help="Service name to infer against. If omitted, uses any deployed service.",
     ),
+    model: str = typer.Option(
+        None,
+        "--model",
+        help="Model name/path for tokenizer. If omitted, auto-detect from deployed shards.",
+    ),
     max_tokens: int = typer.Option(100, "--max-tokens", help="Max tokens to generate."),
 ) -> None:
     """Run distributed inference across multiple shards.
@@ -493,6 +498,7 @@ def infer(
         shard_addresses=shard_addresses,
         master=master,
         service_name=service,
+        model_name=model,
         max_tokens=max_tokens,
     )
 

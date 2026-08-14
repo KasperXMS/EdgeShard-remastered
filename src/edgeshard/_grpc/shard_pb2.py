@@ -24,7 +24,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0bshard.proto\x12\x0f\x65\x64geshard.shard\"O\n\rTensorMessage\x12\r\n\x05shape\x18\x01 \x03(\x03\x12\r\n\x05\x64type\x18\x02 \x01(\t\x12\x0c\n\x04\x64\x61ta\x18\x03 \x01(\x0c\x12\x12\n\nsession_id\x18\x04 \x01(\t\"u\n\x11SendTensorRequest\x12\x17\n\x0fsource_shard_id\x18\x01 \x01(\t\x12\x17\n\x0ftarget_shard_id\x18\x02 \x01(\t\x12.\n\x06tensor\x18\x03 \x01(\x0b\x32\x1e.edgeshard.shard.TensorMessage\"6\n\x12SendTensorResponse\x12\x0f\n\x07success\x18\x01 \x01(\x08\x12\x0f\n\x07message\x18\x02 \x01(\t\"@\n\x11RecvTensorRequest\x12\x12\n\nsession_id\x18\x01 \x01(\t\x12\x17\n\x0fsource_shard_id\x18\x02 \x01(\t\"f\n\x12RecvTensorResponse\x12\x0f\n\x07success\x18\x01 \x01(\x08\x12\x0f\n\x07message\x18\x02 \x01(\t\x12.\n\x06tensor\x18\x03 \x01(\x0b\x32\x1e.edgeshard.shard.TensorMessage2\x8d\x02\n\x0cShardService\x12U\n\nSendTensor\x12\".edgeshard.shard.SendTensorRequest\x1a#.edgeshard.shard.SendTensorResponse\x12U\n\nRecvTensor\x12\".edgeshard.shard.RecvTensorRequest\x1a#.edgeshard.shard.RecvTensorResponse\x12O\n\x04Ping\x12\".edgeshard.shard.RecvTensorRequest\x1a#.edgeshard.shard.SendTensorResponseb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0bshard.proto\x12\x0f\x65\x64geshard.shard\"O\n\rTensorMessage\x12\r\n\x05shape\x18\x01 \x03(\x03\x12\r\n\x05\x64type\x18\x02 \x01(\t\x12\x0c\n\x04\x64\x61ta\x18\x03 \x01(\x0c\x12\x12\n\nsession_id\x18\x04 \x01(\t\"u\n\x11SendTensorRequest\x12\x17\n\x0fsource_shard_id\x18\x01 \x01(\t\x12\x17\n\x0ftarget_shard_id\x18\x02 \x01(\t\x12.\n\x06tensor\x18\x03 \x01(\x0b\x32\x1e.edgeshard.shard.TensorMessage\"6\n\x12SendTensorResponse\x12\x0f\n\x07success\x18\x01 \x01(\x08\x12\x0f\n\x07message\x18\x02 \x01(\t\"@\n\x11RecvTensorRequest\x12\x12\n\nsession_id\x18\x01 \x01(\t\x12\x17\n\x0fsource_shard_id\x18\x02 \x01(\t\"f\n\x12RecvTensorResponse\x12\x0f\n\x07success\x18\x01 \x01(\x08\x12\x0f\n\x07message\x18\x02 \x01(\t\x12.\n\x06tensor\x18\x03 \x01(\x0b\x32\x1e.edgeshard.shard.TensorMessage\"S\n\x14\x43reateSessionRequest\x12\x12\n\nsession_id\x18\x01 \x01(\t\x12\x12\n\nbatch_size\x18\x02 \x01(\x05\x12\x13\n\x0bmax_seq_len\x18\x03 \x01(\x05\"9\n\x15\x43reateSessionResponse\x12\x0f\n\x07success\x18\x01 \x01(\x08\x12\x0f\n\x07message\x18\x02 \x01(\t\"\xa2\x01\n\x10InferenceRequest\x12\x12\n\nsession_id\x18\x01 \x01(\t\x12\x31\n\tinput_ids\x18\x02 \x01(\x0b\x32\x1e.edgeshard.shard.TensorMessage\x12\x35\n\rhidden_states\x18\x03 \x01(\x0b\x32\x1e.edgeshard.shard.TensorMessage\x12\x10\n\x08token_id\x18\x04 \x01(\x05\"e\n\x11InferenceResponse\x12\x0f\n\x07success\x18\x01 \x01(\x08\x12\x0f\n\x07message\x18\x02 \x01(\t\x12.\n\x06output\x18\x03 \x01(\x0b\x32\x1e.edgeshard.shard.TensorMessage\"+\n\x15ReleaseSessionRequest\x12\x12\n\nsession_id\x18\x01 \x01(\t\":\n\x16ReleaseSessionResponse\x12\x0f\n\x07success\x18\x01 \x01(\x08\x12\x0f\n\x07message\x18\x02 \x01(\t2\xf9\x04\n\x0cShardService\x12U\n\nSendTensor\x12\".edgeshard.shard.SendTensorRequest\x1a#.edgeshard.shard.SendTensorResponse\x12U\n\nRecvTensor\x12\".edgeshard.shard.RecvTensorRequest\x1a#.edgeshard.shard.RecvTensorResponse\x12O\n\x04Ping\x12\".edgeshard.shard.RecvTensorRequest\x1a#.edgeshard.shard.SendTensorResponse\x12^\n\rCreateSession\x12%.edgeshard.shard.CreateSessionRequest\x1a&.edgeshard.shard.CreateSessionResponse\x12S\n\nRunPrefill\x12!.edgeshard.shard.InferenceRequest\x1a\".edgeshard.shard.InferenceResponse\x12R\n\tRunDecode\x12!.edgeshard.shard.InferenceRequest\x1a\".edgeshard.shard.InferenceResponse\x12\x61\n\x0eReleaseSession\x12&.edgeshard.shard.ReleaseSessionRequest\x1a\'.edgeshard.shard.ReleaseSessionResponseb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -41,6 +41,18 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_RECVTENSORREQUEST']._serialized_end=352
   _globals['_RECVTENSORRESPONSE']._serialized_start=354
   _globals['_RECVTENSORRESPONSE']._serialized_end=456
-  _globals['_SHARDSERVICE']._serialized_start=459
-  _globals['_SHARDSERVICE']._serialized_end=728
+  _globals['_CREATESESSIONREQUEST']._serialized_start=458
+  _globals['_CREATESESSIONREQUEST']._serialized_end=541
+  _globals['_CREATESESSIONRESPONSE']._serialized_start=543
+  _globals['_CREATESESSIONRESPONSE']._serialized_end=600
+  _globals['_INFERENCEREQUEST']._serialized_start=603
+  _globals['_INFERENCEREQUEST']._serialized_end=765
+  _globals['_INFERENCERESPONSE']._serialized_start=767
+  _globals['_INFERENCERESPONSE']._serialized_end=868
+  _globals['_RELEASESESSIONREQUEST']._serialized_start=870
+  _globals['_RELEASESESSIONREQUEST']._serialized_end=913
+  _globals['_RELEASESESSIONRESPONSE']._serialized_start=915
+  _globals['_RELEASESESSIONRESPONSE']._serialized_end=973
+  _globals['_SHARDSERVICE']._serialized_start=976
+  _globals['_SHARDSERVICE']._serialized_end=1609
 # @@protoc_insertion_point(module_scope)

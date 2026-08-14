@@ -73,6 +73,8 @@ class DeploymentBackend(ABC):
         data_host: str = "0.0.0.0",
         data_port: int = 50100,
         master_address: str = "localhost:10500",
+        is_first: bool = False,
+        is_last: bool = False,
     ) -> ShardHandle:
         """Start a shard process.
 
@@ -84,6 +86,8 @@ class DeploymentBackend(ABC):
             data_host: Data plane host.
             data_port: Data plane port.
             master_address: Master address for registration.
+            is_first: True if this is the first shard (has embedding).
+            is_last: True if this is the last shard (has LM head).
 
         Returns:
             ShardHandle with status and data address.
@@ -165,6 +169,7 @@ class DeploymentBackend(ABC):
             List of ShardHandle objects for all shards.
         """
         handles = []
+        total_shards = len(plan.shards)
         for i, shard in enumerate(plan.shards):
             handle = await self.start_shard(
                 shard_placement=shard,
@@ -172,6 +177,8 @@ class DeploymentBackend(ABC):
                 model_revision=plan.service_spec.model.revision,
                 dtype=plan.service_spec.model.dtype,
                 data_port=base_port + i,
+                is_first=(i == 0),
+                is_last=(i == total_shards - 1),
             )
             handles.append(handle)
 

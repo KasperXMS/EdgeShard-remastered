@@ -221,6 +221,9 @@ class EdgeShardMasterServicer(edgeshard_pb2_grpc.WorkerServiceServicer):
                 "layer_start": s.layer_start,
                 "layer_end": s.layer_end,
                 "device": s.device,
+                "model_name": s.model_name,
+                "is_first_shard": s.is_first_shard,
+                "is_last_shard": s.is_last_shard,
             }
             for s in request.shards
         ]
@@ -272,6 +275,9 @@ class EdgeShardMasterServicer(edgeshard_pb2_grpc.WorkerServiceServicer):
                     layer_start=shard["layer_start"],
                     layer_end=shard["layer_end"],
                     device=shard["device"],
+                    model_name=shard.get("model_name", ""),
+                    is_first_shard=shard.get("is_first_shard", False),
+                    is_last_shard=shard.get("is_last_shard", False),
                 )
             )
 

@@ -16,6 +16,7 @@ class DeviceInfo:
     device_type: str  # "cuda", "jetson", "cpu"
     name: str
     total_memory_mb: int
+    available_memory_mb: int = 0  # Dynamic: free memory from latest heartbeat
     compute_capability: str | None = None
     properties: dict[str, Any] = field(default_factory=dict)
 

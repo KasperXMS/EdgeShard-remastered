@@ -39,6 +39,8 @@ class LocalDeploymentBackend(DeploymentBackend):
         data_host: str = "0.0.0.0",
         data_port: int = 50100,
         master_address: str = "localhost:10500",
+        is_first: bool = False,
+        is_last: bool = False,
     ) -> ShardHandle:
         """Start a shard as a local subprocess."""
         shard_id = f"shard-{shard_placement.shard_index}"
@@ -75,8 +77,10 @@ class LocalDeploymentBackend(DeploymentBackend):
             str(data_port),
         ]
 
-        if shard_placement.shard_index == 0:
+        if is_first:
             cmd.append("--first")
+        if is_last:
+            cmd.append("--last")
 
         logger.info(f"Starting shard subprocess: {' '.join(cmd)}")
 

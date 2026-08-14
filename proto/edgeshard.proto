@@ -287,6 +287,9 @@ message ShardEndpoint {
   int32 layer_start = 4;
   int32 layer_end = 5;
   string device = 6;
+  string model_name = 7;      // HuggingFace model ID or local path
+  bool is_first_shard = 8;    // Has embedding layer
+  bool is_last_shard = 9;     // Has LM head
 }
 
 message RegisterShardsRequest {

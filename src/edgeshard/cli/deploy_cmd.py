@@ -150,8 +150,16 @@ def deploy_service(
             channel = _grpc.insecure_channel(master)
             stub = edgeshard_pb2_grpc.WorkerServiceStub(channel)
 
+            # Determine first/last shard indices
+            sorted_handles = sorted(
+                state.shards.values(),
+                key=lambda h: h.layer_start,
+            )
+            first_shard_id = sorted_handles[0].shard_id if sorted_handles else ""
+            last_shard_id = sorted_handles[-1].shard_id if sorted_handles else ""
+
             shards_proto = []
-            for handle in state.shards.values():
+            for handle in sorted_handles:
                 shards_proto.append(
                     edgeshard_pb2.ShardEndpoint(
                         shard_id=handle.shard_id,
@@ -160,6 +168,9 @@ def deploy_service(
                         layer_start=handle.layer_start,
                         layer_end=handle.layer_end,
                         device=handle.device,
+                        model_name=handle.model_name,
+                        is_first_shard=(handle.shard_id == first_shard_id),
+                        is_last_shard=(handle.shard_id == last_shard_id),
                     )
                 )
 

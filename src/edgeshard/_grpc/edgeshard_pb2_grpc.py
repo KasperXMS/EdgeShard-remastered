@@ -3,7 +3,7 @@
 import grpc
 import warnings
 
-from edgeshard._grpc import edgeshard_pb2 as edgeshard__pb2
+import edgeshard._grpc.edgeshard_pb2 as edgeshard__pb2
 
 GRPC_GENERATED_VERSION = '1.83.0'
 GRPC_VERSION = grpc.__version__
