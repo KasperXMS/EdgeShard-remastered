@@ -54,6 +54,7 @@ class Qwen2Adapter(ModelAdapter):
     ) -> None:
         """Load a subset of Qwen2 model layers."""
         logger.info(f"Loading Qwen2 layers [{layer_start}, {layer_end}) from {model_path}")
+        logger.info(f"  Target dtype: {dtype}, device: {device}")
 
         self._device = device
         self._dtype = dtype
@@ -111,6 +112,15 @@ class Qwen2Adapter(ModelAdapter):
         self._loaded = True
         logger.info(f"Loaded {len(self._layers)} layers on {device}")
 
+        # Log actual GPU memory usage
+        if device.type == "cuda":
+            allocated = torch.cuda.memory_allocated(device) / (1024 ** 3)
+            reserved = torch.cuda.memory_reserved(device) / (1024 ** 3)
+            logger.info(
+                f"  GPU memory after load: "
+                f"allocated={allocated:.2f} GiB, reserved={reserved:.2f} GiB"
+            )
+
     def _load_weights(self, model_path: Path, device: torch.device) -> dict[str, torch.Tensor]:
         """Load weights from single or sharded checkpoint."""
         device_str = str(device)
@@ -162,6 +172,10 @@ class Qwen2Adapter(ModelAdapter):
         )
 
         config = Qwen2Config(**self._config)
+        # Set torch_dtype so HF layers are initialized in the target dtype
+        config.torch_dtype = self._dtype
+
+        logger.debug(f"Building model with config dtype={self._dtype}")
 
         # Embedding layer (only on first shard)
         if layer_start == 0 and "model.embed_tokens.weight" in weights:

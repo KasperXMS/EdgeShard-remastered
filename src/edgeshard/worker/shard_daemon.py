@@ -77,7 +77,9 @@ class ShardDaemon:
         }
         dtype = dtype_map.get(self._dtype, torch.float16)
 
-        logger.info(f"Loading model on {device} with dtype {dtype}")
+        logger.info(f"Loading model on {device}")
+        logger.info(f"  Dtype: {self._dtype} → {dtype}")
+        logger.info(f"  Device: {device} ({torch.cuda.get_device_name(device) if device.type == 'cuda' else 'CPU'})")
 
         # Auto-download model from HuggingFace if not found locally
         self._model_path = self._ensure_model_available(self._model_path)
@@ -167,24 +169,48 @@ class ShardDaemon:
                 return
 
             # Estimate memory per layer (model weights only, in MB)
-            # Per layer: 4 * hidden_size^2 (QKV + O projections)
-            #          + 2 * hidden_size * intermediate_size (gate + up + down)
-            #          + 2 * hidden_size * num_kv_heads/n * head_dim (KV projections)
-            # Simplified: ~4 * hidden_size^2 + 3 * hidden_size * intermediate_size
+            # GQA-aware attention: Q + O = 2 * hidden^2, K + V = 2 * hidden * kv_dim
+            # FFN: gate + up + down = 3 * hidden * intermediate
             dtype_bytes = {
                 torch.float16: 2,
                 torch.bfloat16: 2,
                 torch.float32: 4,
             }.get(dtype, 2)
 
-            per_layer_params = (
-                4 * hidden_size * hidden_size
-                + 3 * hidden_size * intermediate_size
-            ) if intermediate_size else (12 * hidden_size * hidden_size)
+            if num_attention_heads > 0 and num_key_value_heads > 0:
+                head_dim = hidden_size / num_attention_heads
+                kv_dim = num_key_value_heads * head_dim
+                attn_params = (
+                    2 * hidden_size * hidden_size  # Q + O
+                    + 2 * hidden_size * kv_dim      # K + V
+                )
+            else:
+                attn_params = 4 * hidden_size * hidden_size
+
+            if intermediate_size:
+                ffn_params = 3 * hidden_size * intermediate_size
+            else:
+                ffn_params = 4 * hidden_size * hidden_size
+
+            per_layer_params = attn_params + ffn_params
             per_layer_mb = per_layer_params * dtype_bytes / (1024 * 1024)
 
             num_shard_layers = self._layer_end - self._layer_start
             estimated_mb = per_layer_mb * num_shard_layers
+
+            # Add KV cache memory for this shard's layers
+            if num_attention_heads > 0 and num_key_value_heads > 0:
+                head_dim = hidden_size / num_attention_heads
+                # KV cache per token per layer: 2 * num_kv_heads * head_dim * dtype_bytes
+                kv_cache_per_token_per_layer = (
+                    2 * num_key_value_heads * head_dim * dtype_bytes / (1024 * 1024)
+                )
+                # Assume max_seq_len=4096 for estimation
+                max_seq_len = 4096
+                kv_cache_mb = (
+                    kv_cache_per_token_per_layer * num_shard_layers * max_seq_len
+                )
+                estimated_mb += kv_cache_mb
 
             # Add overhead for embedding (first shard) and LM head (last shard)
             if self._is_first_shard:
@@ -194,7 +220,7 @@ class ShardDaemon:
                 vocab_size = config.get("vocab_size", 150000)
                 estimated_mb += vocab_size * hidden_size * dtype_bytes / (1024 * 1024)
 
-            # Add 10% safety margin for activations, KV cache, fragmentation
+            # Add 10% safety margin for activations and fragmentation
             estimated_mb *= 1.1
 
             # Get available GPU memory via NVML

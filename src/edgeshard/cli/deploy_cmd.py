@@ -46,6 +46,7 @@ def deploy_service(
     console.print(f"[bold]EdgeShard Deploy[/bold]")
     console.print(f"  Service: {plan.service_name.value}")
     console.print(f"  Model:   {plan.service_spec.model.name}")
+    console.print(f"  Dtype:   [cyan]{plan.service_spec.model.dtype}[/cyan]")
     console.print(f"  Shards:  {len(plan.shards)}")
     console.print()
 

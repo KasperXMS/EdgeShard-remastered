@@ -20,6 +20,32 @@ from edgeshard.scheduler.snapshot import ProfileEntry
 logger = get_logger(__name__)
 
 
+# Mapping from torch dtype strings (as found in config.json torch_dtype)
+# to bytes per parameter.
+_TORCH_DTYPE_TO_BYTES: dict[str, int] = {
+    "float16": 2,
+    "fp16": 2,
+    "bfloat16": 2,
+    "bf16": 2,
+    "float32": 4,
+    "fp32": 4,
+    "float64": 8,
+    "fp64": 8,
+    "int8": 1,
+    "uint8": 1,
+    "int4": 1,  # approximate (packed)
+    "torch.float16": 2,
+    "torch.bfloat16": 2,
+    "torch.float32": 4,
+    "torch.float64": 8,
+}
+
+
+def _torch_dtype_to_bytes(dtype_str: str) -> int:
+    """Convert a torch dtype string (from config.json) to bytes per parameter."""
+    return _TORCH_DTYPE_TO_BYTES.get(dtype_str, 2)  # default to 2 (float16)
+
+
 @dataclass
 class ModelSchedulingInfo:
     """Model metadata needed by the scheduler.
@@ -147,16 +173,36 @@ def load_model_info(
     if info.num_layers > 0 and info.total_model_memory_mb > 0.0:
         info.per_layer_memory_mb = info.total_model_memory_mb / info.num_layers
     elif info.num_layers > 0 and info.hidden_size > 0:
-        # Estimate from architecture: each layer has attention + FFN
-        # Attention: Q, K, V, O projections ≈ 4 * hidden^2 (or 3*hidden^2 for GQA)
-        # FFN: gate, up, down ≈ 3 * hidden * intermediate
-        attn_params = 4 * info.hidden_size * info.hidden_size
+        # Estimate from architecture: GQA-aware attention + FFN
+        if info.num_attention_heads > 0 and info.num_kv_heads > 0:
+            head_dim = info.hidden_size / info.num_attention_heads
+            kv_dim = info.num_kv_heads * head_dim
+            attn_params = (
+                2 * info.hidden_size * info.hidden_size  # Q + O
+                + 2 * info.hidden_size * kv_dim           # K + V
+            )
+        else:
+            attn_params = 4 * info.hidden_size * info.hidden_size
         if info.intermediate_size > 0:
             ffn_params = 3 * info.hidden_size * info.intermediate_size
         else:
-            ffn_params = 4 * info.hidden_size * info.hidden_size  # rough estimate
+            ffn_params = 4 * info.hidden_size * info.hidden_size
         layer_params = attn_params + ffn_params
         info.per_layer_memory_mb = (layer_params * dtype_bytes) / (1024 * 1024)
+
+    # Compute KV cache per token if not set (from profile)
+    if (
+        info.kv_cache_per_token_mb == 0.0
+        and info.num_layers > 0
+        and info.num_kv_heads > 0
+        and info.num_attention_heads > 0
+        and info.hidden_size > 0
+    ):
+        head_dim = info.hidden_size / info.num_attention_heads
+        kv_per_token_per_layer = 2 * info.num_kv_heads * head_dim * dtype_bytes
+        info.kv_cache_per_token_mb = (
+            info.num_layers * kv_per_token_per_layer / (1024 * 1024)
+        )
 
     if info.num_layers <= 0:
         raise SchedulerError(
@@ -174,6 +220,10 @@ def _try_load_from_config(
 
     Supports both local paths and HuggingFace model IDs.
     Returns None if config.json cannot be found/loaded.
+
+    Reads torch_dtype from config.json and logs if it differs from
+    the target dtype — but memory estimation uses the TARGET dtype
+    (from service spec) since that's what determines GPU memory.
     """
     config_path = _resolve_config_path(model_path)
     if config_path is None:
@@ -190,6 +240,18 @@ def _try_load_from_config(
     if num_layers <= 0:
         return None
 
+    # Log actual model weight dtype for debugging
+    torch_dtype_str = config.get("torch_dtype", "")
+    if torch_dtype_str:
+        saved_dtype_bytes = _torch_dtype_to_bytes(torch_dtype_str)
+        if saved_dtype_bytes != dtype_bytes:
+            logger.info(
+                f"Model saved as {torch_dtype_str} ({saved_dtype_bytes} bytes/param), "
+                f"serving in target dtype ({dtype_bytes} bytes/param). "
+                f"GPU memory estimated using target dtype."
+            )
+
+    # Return raw info — memory computation uses target dtype in load_model_info
     return ModelSchedulingInfo(
         num_layers=num_layers,
         hidden_size=config.get("hidden_size", 0),
@@ -258,16 +320,52 @@ def _build_info_from_config(cfg: dict, dtype_bytes: int) -> ModelSchedulingInfo:
         vocab_size=cfg.get("vocab_size", 0),
     )
 
-    # Estimate per-layer memory from architecture
+    # Estimate per-layer memory from architecture (GQA-aware)
     if info.hidden_size > 0:
-        attn_params = 4 * info.hidden_size * info.hidden_size
+        # Attention parameters (GQA-aware):
+        #   Q projection: hidden_size * hidden_size
+        #   K projection: hidden_size * (num_kv_heads * head_dim)
+        #   V projection: hidden_size * (num_kv_heads * head_dim)
+        #   O projection: hidden_size * hidden_size
+        # For standard MHA (num_kv_heads == num_attention_heads): 4 * hidden^2
+        # For GQA (num_kv_heads < num_attention_heads): less than 4 * hidden^2
+        if info.num_attention_heads > 0 and info.num_kv_heads > 0:
+            head_dim = info.hidden_size / info.num_attention_heads
+            kv_dim = info.num_kv_heads * head_dim
+            attn_params = (
+                2 * info.hidden_size * info.hidden_size  # Q + O
+                + 2 * info.hidden_size * kv_dim           # K + V
+            )
+        else:
+            # Fallback: assume standard MHA
+            attn_params = 4 * info.hidden_size * info.hidden_size
+
+        # FFN parameters: gate + up + down projections
         if info.intermediate_size > 0:
             ffn_params = 3 * info.hidden_size * info.intermediate_size
         else:
             ffn_params = 4 * info.hidden_size * info.hidden_size
+
         layer_params = attn_params + ffn_params
         info.per_layer_memory_mb = (layer_params * dtype_bytes) / (1024 * 1024)
         info.total_model_memory_mb = info.per_layer_memory_mb * info.num_layers
+
+    # Estimate KV cache per token from architecture (GQA-aware)
+    if (
+        info.num_layers > 0
+        and info.num_kv_heads > 0
+        and info.hidden_size > 0
+        and info.num_attention_heads > 0
+    ):
+        head_dim = info.hidden_size / info.num_attention_heads
+        # Per token per layer: K + V = 2 * num_kv_heads * head_dim * dtype_bytes
+        kv_per_token_per_layer = (
+            2 * info.num_kv_heads * head_dim * dtype_bytes
+        )
+        # Total across all layers
+        info.kv_cache_per_token_mb = (
+            info.num_layers * kv_per_token_per_layer / (1024 * 1024)
+        )
 
     return info
 
