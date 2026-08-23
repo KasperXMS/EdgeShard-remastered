@@ -180,7 +180,6 @@ async def _run_inference(
             return_tensors="pt",
             add_generation_prompt=True,
         )
-        logger.info(f"Using chat template, input_ids shape: {input_ids.shape}")
     else:
         # Direct encode for base models
         input_ids = tokenizer.encode(prompt, return_tensors="pt")
