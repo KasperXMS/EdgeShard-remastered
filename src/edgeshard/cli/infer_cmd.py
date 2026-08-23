@@ -96,12 +96,32 @@ async def _run_inference(
             console.print("[yellow]Is the Master running?[/yellow]")
             raise SystemExit(1)
     else:
-        # Manual mode — assume single shard
+        # Manual mode — try to discover model from local plan/service files
         discovered_model = None
         shard_meta = [
             {"shard_id": f"shard-{i}", "is_first": (i == 0), "is_last": (i == len(shard_addresses) - 1)}
             for i in range(len(shard_addresses))
         ]
+
+        # Try to read model name from local .edgeshard/plan.yaml or service.yaml
+        try:
+            from pathlib import Path
+            plan_path = Path(".edgeshard/plan.yaml")
+            service_path = Path(".edgeshard/service.yaml")
+
+            if plan_path.exists():
+                import yaml
+                with open(plan_path) as f:
+                    plan_data = yaml.safe_load(f)
+                    discovered_model = plan_data.get("model")
+            elif service_path.exists():
+                import yaml
+                with open(service_path) as f:
+                    service_data = yaml.safe_load(f)
+                    model_info = service_data.get("model", {})
+                    discovered_model = model_info.get("name") if isinstance(model_info, dict) else model_info
+        except Exception:
+            pass  # Ignore errors reading local files
 
     # ------------------------------------------------------------------
     # 2. Resolve model name for tokenizer
