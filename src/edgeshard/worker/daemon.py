@@ -165,6 +165,7 @@ class WorkerDaemon:
         self._channel: grpc.Channel | None = None
         self._stub: edgeshard_pb2_grpc.WorkerServiceStub | None = None
         self._running = False
+        self._registered = False  # Track if registration succeeded
         self._heartbeat_task: asyncio.Task | None = None
         self._network_probe = NetworkProbe(self._worker_id)
         self._known_workers: dict[str, tuple[str, int]] = {}  # worker_id -> (host, port)
@@ -222,7 +223,8 @@ class WorkerDaemon:
             await self.stop_shard(shard_id)
 
         # Unregister from Master FIRST (before stopping server/channel)
-        if self._stub:
+        # Only if registration succeeded
+        if self._registered and self._stub:
             await self._unregister()
 
         # Stop gRPC server
@@ -416,7 +418,7 @@ class WorkerDaemon:
         return list(self._shards.values())
 
     async def _register(self) -> None:
-        """Register this Worker with the Master."""
+        """Register this Worker with the Master. Retries with backoff."""
         request = edgeshard_pb2.RegisterWorkerRequest(
             worker_id=self._worker_id,
             hostname=self._hostname,
@@ -428,16 +430,37 @@ class WorkerDaemon:
         for device in self._devices:
             request.devices.append(device)
 
-        try:
-            response = await self._stub.RegisterWorker(request)
-            if response.success:
-                logger.info(f"Registered with Master: {response.message}")
-            else:
-                logger.error(f"Registration failed: {response.message}")
-                raise RuntimeError(f"Registration failed: {response.message}")
-        except grpc.RpcError as e:
-            logger.error(f"Registration RPC error: {e}")
-            raise
+        max_retries = 10
+        for attempt in range(1, max_retries + 1):
+            try:
+                response = await asyncio.wait_for(
+                    self._stub.RegisterWorker(request),
+                    timeout=10.0,
+                )
+                if response.success:
+                    logger.info(f"Registered with Master: {response.message}")
+                    self._registered = True
+                    return
+                else:
+                    logger.error(f"Registration failed: {response.message}")
+                    raise RuntimeError(f"Registration failed: {response.message}")
+            except asyncio.TimeoutError:
+                logger.warning(
+                    f"Registration timed out (attempt {attempt}/{max_retries}), "
+                    f"retrying in {attempt * 3}s..."
+                )
+            except grpc.RpcError as e:
+                logger.warning(
+                    f"Registration RPC error (attempt {attempt}/{max_retries}): "
+                    f"{e.code().name} — {e.details()}. "
+                    f"Retrying in {attempt * 3}s..."
+                )
+            await asyncio.sleep(attempt * 3)
+
+        raise RuntimeError(
+            f"Failed to register with Master after {max_retries} attempts. "
+            f"Check that the Master is running and reachable."
+        )
 
     async def _unregister(self) -> None:
         """Unregister this Worker from the Master."""

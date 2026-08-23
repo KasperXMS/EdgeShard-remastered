@@ -43,7 +43,17 @@ def start_worker(master_address: str, config_path: str) -> None:
     worker = WorkerDaemon(config)
 
     async def run() -> None:
-        await worker.start()
+        try:
+            await worker.start()
+        except Exception as e:
+            console.print(f"\n[red]Worker failed to start: {e}[/red]")
+            # Clean up partially-started worker
+            try:
+                await worker.stop()
+            except Exception:
+                pass
+            return
+
         console.print("[dim]Worker is running. Press Ctrl+C to stop.[/dim]")
         try:
             # Keep running
