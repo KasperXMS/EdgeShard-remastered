@@ -78,7 +78,7 @@ class Qwen2Adapter(ModelAdapter):
         # Load model weights to CPU first to avoid GPU memory bloat
         state_dict = self._load_weights(Path(model_path), torch.device("cpu"))
 
-        # Filter weights for this shard's layer range, then move to target device
+        # Filter weights for this shard's layer range (keep on CPU to avoid GPU memory bloat)
         shard_weights = {}
         non_layer_keys = []
         for key, value in state_dict.items():
@@ -89,26 +89,31 @@ class Qwen2Adapter(ModelAdapter):
                         f"model.layers.{layer_idx}.",
                         f"model.layers.{layer_idx - layer_start}.",
                     )
-                    shard_weights[new_key] = value.to(dtype=dtype, device=device)
+                    # Convert dtype but keep on CPU — will move to GPU after model is built
+                    shard_weights[new_key] = value.to(dtype=dtype)
             else:
                 non_layer_keys.append(key)
                 if key == "model.embed_tokens.weight":
                     # Load embed_tokens if this is the first shard OR if embeddings are tied
                     tie_word_embeddings = self._config.get("tie_word_embeddings", False)
                     if layer_start == 0 or (layer_end == num_layers and tie_word_embeddings):
-                        shard_weights[key] = value.to(dtype=dtype, device=device)
+                        shard_weights[key] = value.to(dtype=dtype)
                 elif key == "model.norm.weight" and layer_end == num_layers:
-                    shard_weights[key] = value.to(dtype=dtype, device=device)
+                    shard_weights[key] = value.to(dtype=dtype)
                 elif key == "lm_head.weight" and layer_end == num_layers:
-                    shard_weights[key] = value.to(dtype=dtype, device=device)
+                    shard_weights[key] = value.to(dtype=dtype)
 
         logger.info(f"Non-layer weight keys in checkpoint: {non_layer_keys}")
 
         # Free the full state dict from CPU memory
         del state_dict
 
-        # Build model components
+        # Build model components (weights are on CPU, layers move to GPU)
         self._build_model(shard_weights, layer_start, layer_end, num_layers)
+
+        # Free shard_weights — they've been copied into model layers
+        del shard_weights
+
         self._loaded = True
         logger.info(f"Loaded {len(self._layers)} layers on {device}")
 
@@ -196,27 +201,35 @@ class Qwen2Adapter(ModelAdapter):
         layer_end: int,
         num_layers: int,
     ) -> None:
-        """Inner model building logic, runs with correct default dtype."""
+        """Inner model building logic, runs with correct default dtype.
+
+        IMPORTANT: weights are on CPU. We build layers on CPU, load weights,
+        then move everything to GPU in one shot. This avoids GPU memory bloat
+        from having both raw weights and layer parameters on GPU simultaneously.
+        """
         from transformers.models.qwen2.modeling_qwen2 import (
             Qwen2DecoderLayer,
             Qwen2RMSNorm,
         )
         import torch.nn as nn
 
-        # Embedding layer (only on first shard)
+        # Embedding layer (only on first shard) — build on CPU first
         if layer_start == 0 and "model.embed_tokens.weight" in weights:
             vocab_size = config.vocab_size
             hidden_size = config.hidden_size
             self._embed_tokens = nn.Embedding(vocab_size, hidden_size)
-            self._embed_tokens.weight.data = weights["model.embed_tokens.weight"]
+            # Load weight on CPU (weights are on CPU at this point)
+            self._embed_tokens.weight.data.copy_(weights["model.embed_tokens.weight"])
+            # Now move to target device
             self._embed_tokens.to(self._device, self._dtype)
 
-        # Transformer layers
+        # Transformer layers — build on CPU, load weights, then move to GPU
         self._layers = []
         for i in range(layer_end - layer_start):
-            # Use local layer index (0, 1, 2, ...) for DynamicCache compatibility
+            # Create layer on CPU (default dtype is already set to target dtype)
             layer = Qwen2DecoderLayer(config, layer_idx=i)
-            # Load weights for this layer
+
+            # Load weights for this layer (weights are on CPU)
             layer_weights = {
                 k.replace(f"model.layers.{i}.", ""): v
                 for k, v in weights.items()
@@ -228,14 +241,15 @@ class Qwen2Adapter(ModelAdapter):
             if unexpected:
                 logger.warning(f"Layer {i} unexpected keys: {len(unexpected)} keys")
 
+            # Move to target device AFTER loading weights (single transfer)
             layer.to(self._device, self._dtype)
             layer.eval()
             self._layers.append(layer)
 
-        # Final norm (only on last shard)
+        # Final norm (only on last shard) — build on CPU, then move
         if layer_end == num_layers and "model.norm.weight" in weights:
             self._norm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-            self._norm.weight.data = weights["model.norm.weight"]
+            self._norm.weight.data.copy_(weights["model.norm.weight"])
             self._norm.to(self._device, self._dtype)
             logger.debug(f"Loaded final norm (layer_end={layer_end}, num_layers={num_layers})")
 
@@ -245,15 +259,15 @@ class Qwen2Adapter(ModelAdapter):
 
         if layer_end == num_layers:
             if "lm_head.weight" in weights:
-                # Separate LM head
+                # Separate LM head — build on CPU, then move
                 self._lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
-                self._lm_head.weight.data = weights["lm_head.weight"]
+                self._lm_head.weight.data.copy_(weights["lm_head.weight"])
                 self._lm_head.to(self._device, self._dtype)
                 logger.debug(f"Loaded LM head (layer_end={layer_end}, num_layers={num_layers})")
             elif tie_word_embeddings and "model.embed_tokens.weight" in weights:
                 # Tied embeddings: create LM head using embed_tokens weight
                 self._lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
-                self._lm_head.weight.data = weights["model.embed_tokens.weight"]
+                self._lm_head.weight.data.copy_(weights["model.embed_tokens.weight"])
                 self._lm_head.to(self._device, self._dtype)
                 logger.info(f"Created LM head from tied embeddings (layer_end={layer_end}, num_layers={num_layers})")
             else:

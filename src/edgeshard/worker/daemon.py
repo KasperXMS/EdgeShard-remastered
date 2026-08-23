@@ -337,9 +337,10 @@ class WorkerDaemon:
             "pid": proc.pid,
         }
 
-        # Poll for shard readiness — wait up to 60 seconds for model loading/download
+        # Poll for shard readiness — wait up to 300 seconds for model loading/download
+        # Large models (7B+) can take several minutes to load from disk or download
         ready = False
-        for _ in range(60):
+        for _ in range(300):
             await asyncio.sleep(1.0)
 
             # Check if process died
@@ -366,7 +367,7 @@ class WorkerDaemon:
         else:
             self._shards[shard_id]["status"] = "failed"
             # Read the last part of the log file for error summary
-            error_msg = f"Shard did not become ready within 60s. Check log: {log_file.resolve()}"
+            error_msg = f"Shard did not become ready within 300s. Check log: {log_file.resolve()}"
             try:
                 log_fh.close()
                 with open(log_file, errors="replace") as f:

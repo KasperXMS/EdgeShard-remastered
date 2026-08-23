@@ -107,10 +107,12 @@ class RemoteDeploymentBackend(DeploymentBackend):
             )
 
             # Run gRPC call in executor to avoid blocking
+            # Use longer timeout — model loading can take several minutes
+            # (especially for large models or when downloading from HuggingFace)
             loop = asyncio.get_event_loop()
             response = await loop.run_in_executor(
                 None,
-                lambda: stub.StartShard(request, timeout=30.0),
+                lambda: stub.StartShard(request, timeout=300.0),
             )
 
             if response.success:
