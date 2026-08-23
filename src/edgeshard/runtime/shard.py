@@ -171,6 +171,11 @@ class ModelShard:
             device=device,
         ).unsqueeze(0).expand(hidden_states.shape[0], -1)
 
+        logger.info(
+            f"Prefill: session_seq_len={session.sequence_length}, "
+            f"seq_len={seq_len}, position_ids={position_ids.tolist()}"
+        )
+
         # Forward through layers
         hidden_states, new_kv_cache = self._adapter.forward(
             hidden_states,

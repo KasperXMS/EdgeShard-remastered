@@ -179,6 +179,8 @@ class Qwen2Adapter(ModelAdapter):
         config = Qwen2Config(**self._config)
         # Set torch_dtype so HF layers are initialized in the target dtype
         config.torch_dtype = self._dtype
+        # Ensure KV cache is enabled for efficient decoding
+        config.use_cache = True
 
         logger.debug(f"Building model with config dtype={self._dtype}")
 
@@ -317,17 +319,16 @@ class Qwen2Adapter(ModelAdapter):
             seq_len: Sequence length.
 
         Returns:
-            Tuple of (cos, sin) tensors.
+            Tuple of (cos, sin) tensors with shape [batch, seq_len, head_dim].
+            Note: HF's apply_rotary_pos_emb will unsqueeze(1) to make it 4D.
         """
         from transformers.models.qwen2.modeling_qwen2 import (
             Qwen2Config,
-            rotate_half,
         )
 
         config = Qwen2Config(**self._config)
         head_dim = config.hidden_size // config.num_attention_heads
         base = config.rope_theta
-        max_position_embeddings = config.max_position_embeddings
 
         # Compute inverse frequencies
         inv_freq = 1.0 / (
@@ -336,27 +337,23 @@ class Qwen2Adapter(ModelAdapter):
 
         # Compute cos/sin for the given position_ids
         # position_ids: [batch, seq_len]
-        # We need to compute freqs for each position
         batch_size, seq_len_actual = position_ids.shape
 
-        # Create position indices [seq_len]
-        position_ids_flat = position_ids.reshape(-1)  # [batch * seq_len]
+        # inv_freq: [head_dim/2]
+        # position_ids: [batch, seq_len]
+        # We need: freqs = outer(position_ids, inv_freq) -> [batch, seq_len, head_dim/2]
+        inv_freq_expanded = inv_freq[None, None, :].expand(batch_size, seq_len_actual, -1)
+        position_ids_expanded = position_ids[:, :, None].float()
 
-        # Compute outer product: [batch * seq_len, head_dim/2]
-        freqs = torch.outer(position_ids_flat.float(), inv_freq)
-
-        # Reshape to [batch, seq_len, head_dim/2]
-        freqs = freqs.reshape(batch_size, seq_len_actual, -1)
+        # freqs: [batch, seq_len, head_dim/2]
+        freqs = inv_freq_expanded * position_ids_expanded
 
         # Create cos/sin embeddings [batch, seq_len, head_dim]
         emb = torch.cat((freqs, freqs), dim=-1)
         cos = emb.cos()
         sin = emb.sin()
 
-        # Reshape for broadcasting: [batch, 1, seq_len, head_dim]
-        cos = cos.unsqueeze(1)
-        sin = sin.unsqueeze(1)
-
+        # Return 3D tensors - HF's apply_rotary_pos_emb will unsqueeze to 4D
         return cos, sin
 
     def forward(
@@ -368,6 +365,15 @@ class Qwen2Adapter(ModelAdapter):
         """Run forward pass through loaded layers."""
         if not self._loaded:
             raise ShardError("Model not loaded")
+
+        # Diagnostic: check hidden states
+        logger.info(
+            f"Forward: hidden_states shape={tuple(hidden_states.shape)}, "
+            f"dtype={hidden_states.dtype}, "
+            f"mean={hidden_states.float().mean():.4f}, "
+            f"std={hidden_states.float().std():.4f}"
+        )
+        logger.info(f"Forward: position_ids={position_ids.tolist()}")
 
         # Compute rotary embeddings once for all layers
         seq_len = hidden_states.shape[1]
@@ -410,16 +416,16 @@ class Qwen2Adapter(ModelAdapter):
 
         for i, layer in enumerate(self._layers):
             try:
-                outputs = layer(
+                # Qwen2DecoderLayer.forward() returns a single tensor, not a tuple
+                hidden_states = layer(
                     hidden_states,
                     attention_mask=attention_mask,
                     position_ids=position_ids,
-                    past_key_value=kv_cache,
+                    past_key_values=kv_cache,
                     use_cache=True,
                     position_embeddings=position_embeddings,
                     cache_position=cache_position,
                 )
-                hidden_states = outputs[0]
             except Exception as e:
                 logger.error(f"Layer {i} forward failed: {e}")
                 raise
@@ -440,20 +446,40 @@ class Qwen2Adapter(ModelAdapter):
         """Compute logits from hidden states."""
         if self._lm_head is None:
             raise ShardError("This shard does not have LM head")
-        return self._lm_head(hidden_states)
+        logits = self._lm_head(hidden_states)
+        # Diagnostic: log logits statistics
+        logger.info(
+            f"Logits: shape={tuple(logits.shape)}, dtype={logits.dtype}, "
+            f"mean={logits.float().mean():.4f}, "
+            f"max={logits.float().max():.4f}, "
+            f"min={logits.float().min():.4f}"
+        )
+        return logits
 
     def init_kv_cache(
         self,
         batch_size: int,
         max_seq_len: int,
         device: torch.device,
-    ) -> list[tuple[torch.Tensor, torch.Tensor]]:
+    ) -> Any:
         """Initialize empty KV cache for Qwen2.
 
         Uses DynamicCache from transformers for proper KV cache management.
+        Note: DynamicCache requires config parameter in newer transformers versions.
         """
         from transformers.cache_utils import DynamicCache
-        return DynamicCache()
+        from transformers.models.qwen2.modeling_qwen2 import Qwen2Config
+
+        # Create config for DynamicCache
+        config = Qwen2Config(**self._config)
+        config.use_cache = True
+
+        # DynamicCache needs config in newer transformers versions
+        try:
+            return DynamicCache(config=config)
+        except TypeError:
+            # Fallback for older transformers versions
+            return DynamicCache()
 
     def get_model_info(self) -> dict[str, Any]:
         """Return Qwen2 model metadata."""

@@ -170,7 +170,20 @@ async def _run_inference(
     console.print()
 
     # Encode prompt
-    input_ids = tokenizer.encode(prompt, return_tensors="pt")
+    # Check if tokenizer has chat template (for chat models like Qwen2.5-Instruct)
+    if hasattr(tokenizer, 'chat_template') and tokenizer.chat_template:
+        # Use chat template for chat models
+        messages = [{"role": "user", "content": prompt}]
+        input_ids = tokenizer.apply_chat_template(
+            messages,
+            tokenize=True,
+            return_tensors="pt",
+            add_generation_prompt=True,
+        )
+        logger.info(f"Using chat template, input_ids shape: {input_ids.shape}")
+    else:
+        # Direct encode for base models
+        input_ids = tokenizer.encode(prompt, return_tensors="pt")
     prompt_len = input_ids.shape[1]
 
     # Create session on all shards

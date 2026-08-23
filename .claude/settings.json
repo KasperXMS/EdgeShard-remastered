@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -c \"import transformers; import os; print\\(os.path.dirname\\(transformers.__file__\\)\\)\")",
+      "Bash(where python *)",
+      "Bash(python -c \"import transformers; import os; print\\(os.path.dirname\\(transformers.__file__\\)\\)\")",
+      "Bash(ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no super \"python3 -c \\\\\"import transformers; import os; print\\(os.path.dirname\\(transformers.__file__\\)\\)\\\\\"\")",
+      "Bash(python -c \"import transformers; print\\(transformers.__version__\\)\")"
+    ]
+  }
+}
