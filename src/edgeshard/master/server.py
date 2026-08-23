@@ -108,8 +108,8 @@ class EdgeShardMasterServicer(edgeshard_pb2_grpc.WorkerServiceServicer):
         request: edgeshard_pb2.ListWorkersRequest,
         context: grpc.ServicerContext,
     ) -> edgeshard_pb2.ListWorkersResponse:
-        """List all registered Workers."""
-        workers = self._worker_manager.list_workers()
+        """List all alive Workers (dead workers are filtered out by heartbeat timeout)."""
+        workers = self._worker_manager.get_alive_workers()
         worker_states = [w.to_proto() for w in workers]
 
         return edgeshard_pb2.ListWorkersResponse(workers=worker_states)
@@ -347,6 +347,7 @@ class MasterServer:
         self._config = config
         self._server: grpc.aio.Server | None = None
         self._servicer = EdgeShardMasterServicer()
+        self._cleanup_task: asyncio.Task | None = None
 
     async def start(self) -> None:
         """Start the Master gRPC server."""
@@ -368,9 +369,18 @@ class MasterServer:
         await self._server.start()
         logger.info(f"Master listening on {bind_address}")
 
+        # Start periodic cleanup of dead workers
+        self._cleanup_task = asyncio.create_task(self._cleanup_dead_workers_loop())
+
     async def stop(self, grace: float = 5.0) -> None:
         """Stop the Master gRPC server."""
         logger.info("Stopping Master gRPC server")
+        if self._cleanup_task:
+            self._cleanup_task.cancel()
+            try:
+                await self._cleanup_task
+            except asyncio.CancelledError:
+                pass
         if self._server:
             await self._server.stop(grace)
         logger.info("Master stopped")
@@ -379,3 +389,16 @@ class MasterServer:
         """Wait for server to terminate."""
         if self._server:
             await self._server.wait_for_termination()
+
+    async def _cleanup_dead_workers_loop(self) -> None:
+        """Periodically purge dead workers that haven't sent heartbeats."""
+        while True:
+            try:
+                await asyncio.sleep(60.0)  # Run every minute
+                purged = self._servicer._worker_manager.purge_dead_workers(timeout_seconds=300.0)
+                if purged > 0:
+                    logger.info(f"Cleanup: purged {purged} dead worker(s)")
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Cleanup task error: {e}")

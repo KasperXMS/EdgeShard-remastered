@@ -78,7 +78,13 @@ def probe_hardware() -> list[edgeshard_pb2.DeviceInfo]:
 
 
 def _probe_nvidia_gpus() -> list[edgeshard_pb2.DeviceInfo]:
-    """Probe NVIDIA GPUs using NVML."""
+    """Probe NVIDIA GPUs using NVML.
+
+    Reports both total and available (free) memory. The free memory
+    is embedded in the GpuMetrics field of DeviceInfo so the scheduler
+    can make placement decisions based on actual available resources,
+    not just total capacity.
+    """
     try:
         import pynvml
 
@@ -96,10 +102,17 @@ def _probe_nvidia_gpus() -> list[edgeshard_pb2.DeviceInfo]:
 
             memory_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
             total_memory_mb = memory_info.total // (1024 * 1024)
+            free_memory_mb = memory_info.free // (1024 * 1024)
 
             # Get compute capability
             major, minor = pynvml.nvmlDeviceGetCudaComputeCapability(handle)
             compute_capability = f"{major}.{minor}"
+
+            # Include current free memory in gpu_metrics so the scheduler
+            # can use it for placement decisions BEFORE the first heartbeat
+            gpu_metrics = edgeshard_pb2.GpuMetrics(
+                free_memory_mb=free_memory_mb,
+            )
 
             device = edgeshard_pb2.DeviceInfo(
                 device_id=f"cuda:{i}",
@@ -107,10 +120,14 @@ def _probe_nvidia_gpus() -> list[edgeshard_pb2.DeviceInfo]:
                 name=name,
                 total_memory_mb=total_memory_mb,
                 compute_capability=compute_capability,
+                gpu_metrics=gpu_metrics,
             )
             devices.append(device)
 
-            logger.info(f"Found GPU {i}: {name} ({total_memory_mb} MB)")
+            logger.info(
+                f"Found GPU {i}: {name} "
+                f"(total={total_memory_mb} MB, free={free_memory_mb} MB)"
+            )
 
         return devices
 

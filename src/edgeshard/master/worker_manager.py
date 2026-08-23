@@ -50,12 +50,15 @@ class WorkerRecord:
 
     def to_proto(self) -> edgeshard_pb2.WorkerState:
         """Convert to protobuf WorkerState message."""
+        # Reflect actual alive status based on heartbeat, not just the stored status
+        actual_status = self.status if self.is_alive() else "offline"
+
         state = edgeshard_pb2.WorkerState(
             worker_id=str(self.worker_id),
             hostname=self.hostname,
             available_memory_mb=self.available_memory_mb,
             cpu_count=self.cpu_count,
-            status=self.status,
+            status=actual_status,
             metadata=self.metadata,
             last_heartbeat=int(self.last_heartbeat),
         )
@@ -232,6 +235,25 @@ class WorkerManager:
             List of alive WorkerRecords.
         """
         return [w for w in self._workers.values() if w.is_alive(timeout_seconds)]
+
+    def purge_dead_workers(self, timeout_seconds: float = 300.0) -> int:
+        """Remove workers that haven't sent a heartbeat in a long time.
+
+        Args:
+            timeout_seconds: Workers with no heartbeat for this long are removed.
+                Default 300s (5 minutes) — much longer than the alive timeout.
+
+        Returns:
+            Number of workers purged.
+        """
+        dead_workers = [
+            wid for wid, w in self._workers.items()
+            if not w.is_alive(timeout_seconds)
+        ]
+        for wid in dead_workers:
+            del self._workers[wid]
+            logger.info(f"Purged dead worker {wid} (no heartbeat for {timeout_seconds}s)")
+        return len(dead_workers)
 
     def get_cluster_snapshot(self) -> dict:
         """Get a snapshot of cluster state for scheduling.

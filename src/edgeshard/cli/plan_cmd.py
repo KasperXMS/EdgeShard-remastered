@@ -60,7 +60,15 @@ def generate_plan(
 
     console.print(f"[green]Cluster:[/green] {len(cluster.workers)} worker(s)")
     for w in cluster.workers:
-        dev_str = ", ".join(f"{d.name} ({d.total_memory_mb} MB)" for d in w.devices)
+        dev_parts = []
+        for d in w.devices:
+            if d.available_memory_mb > 0 and d.available_memory_mb != d.total_memory_mb:
+                dev_parts.append(
+                    f"{d.name} (free={d.available_memory_mb}/{d.total_memory_mb} MB)"
+                )
+            else:
+                dev_parts.append(f"{d.name} ({d.total_memory_mb} MB)")
+        dev_str = ", ".join(dev_parts)
         console.print(f"  - {w.worker_id}: {dev_str}")
     console.print()
 

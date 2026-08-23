@@ -82,6 +82,9 @@ class ShardDaemon:
         # Auto-download model from HuggingFace if not found locally
         self._model_path = self._ensure_model_available(self._model_path)
 
+        # Check GPU memory BEFORE loading — fail early with clear message
+        self._check_gpu_memory(device, dtype)
+
         self._adapter = Qwen2Adapter()
         self._adapter.load(
             model_path=self._model_path,
@@ -125,6 +128,120 @@ class ShardDaemon:
     def get_shard(self) -> ModelShard | None:
         """Get the ModelShard instance (for testing)."""
         return self._shard
+
+    def _check_gpu_memory(self, device: torch.device, dtype: torch.dtype) -> None:
+        """Check if GPU has enough free memory to load this shard's layers.
+
+        Reads config.json to estimate per-layer memory, then checks
+        available GPU memory via NVML. Fails early with a clear message
+        if there's not enough free memory.
+
+        Args:
+            device: Target device (cuda:N or cpu).
+            dtype: Model dtype.
+
+        Raises:
+            RuntimeError: If GPU doesn't have enough free memory.
+        """
+        if device.type != "cuda":
+            return  # CPU: skip GPU memory check
+
+        try:
+            import json
+            config_path = Path(self._model_path) / "config.json"
+            if not config_path.exists():
+                logger.warning("config.json not found, skipping memory check")
+                return
+
+            with open(config_path) as f:
+                config = json.load(f)
+
+            hidden_size = config.get("hidden_size", 0)
+            num_layers = config.get("num_hidden_layers", 0)
+            intermediate_size = config.get("intermediate_size", 0)
+            num_attention_heads = config.get("num_attention_heads", 0)
+            num_key_value_heads = config.get("num_key_value_heads", num_attention_heads)
+
+            if not hidden_size or not num_layers:
+                logger.warning("Missing model config fields, skipping memory check")
+                return
+
+            # Estimate memory per layer (model weights only, in MB)
+            # Per layer: 4 * hidden_size^2 (QKV + O projections)
+            #          + 2 * hidden_size * intermediate_size (gate + up + down)
+            #          + 2 * hidden_size * num_kv_heads/n * head_dim (KV projections)
+            # Simplified: ~4 * hidden_size^2 + 3 * hidden_size * intermediate_size
+            dtype_bytes = {
+                torch.float16: 2,
+                torch.bfloat16: 2,
+                torch.float32: 4,
+            }.get(dtype, 2)
+
+            per_layer_params = (
+                4 * hidden_size * hidden_size
+                + 3 * hidden_size * intermediate_size
+            ) if intermediate_size else (12 * hidden_size * hidden_size)
+            per_layer_mb = per_layer_params * dtype_bytes / (1024 * 1024)
+
+            num_shard_layers = self._layer_end - self._layer_start
+            estimated_mb = per_layer_mb * num_shard_layers
+
+            # Add overhead for embedding (first shard) and LM head (last shard)
+            if self._is_first_shard:
+                vocab_size = config.get("vocab_size", 150000)
+                estimated_mb += vocab_size * hidden_size * dtype_bytes / (1024 * 1024)
+            if self._is_last_shard:
+                vocab_size = config.get("vocab_size", 150000)
+                estimated_mb += vocab_size * hidden_size * dtype_bytes / (1024 * 1024)
+
+            # Add 10% safety margin for activations, KV cache, fragmentation
+            estimated_mb *= 1.1
+
+            # Get available GPU memory via NVML
+            try:
+                import pynvml
+                # Lazy init if needed
+                try:
+                    pynvml.nvmlInit()
+                except Exception:
+                    pass
+                gpu_index = device.index or 0
+                handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_index)
+                mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                free_mb = mem_info.free // (1024 * 1024)
+                total_mb = mem_info.total // (1024 * 1024)
+                used_mb = mem_info.used // (1024 * 1024)
+            except Exception:
+                # Fallback to torch
+                free_mb = torch.cuda.get_device_properties(device).total_memory // (1024 * 1024)
+                allocated = torch.cuda.memory_allocated(device) // (1024 * 1024)
+                total_mb = torch.cuda.get_device_properties(device).total_memory // (1024 * 1024)
+                free_mb = total_mb - allocated
+                used_mb = allocated
+
+            gpu_name = torch.cuda.get_device_name(device)
+
+            logger.info(
+                f"GPU memory check: {gpu_name} | "
+                f"total={total_mb} MB, used={used_mb} MB, free={free_mb} MB | "
+                f"estimated need={estimated_mb:.0f} MB "
+                f"({num_shard_layers} layers, ~{per_layer_mb:.1f} MB/layer)"
+            )
+
+            if free_mb < estimated_mb:
+                raise RuntimeError(
+                    f"Insufficient GPU memory on {gpu_name}! "
+                    f"Free: {free_mb} MB, estimated need: {estimated_mb:.0f} MB "
+                    f"({num_shard_layers} layers x {per_layer_mb:.1f} MB/layer + overhead). "
+                    f"Another process may be using {used_mb} MB. "
+                    f"Free up GPU memory or reduce the number of layers on this shard."
+                )
+
+        except RuntimeError:
+            raise
+        except Exception as e:
+            logger.warning(f"GPU memory check failed (non-fatal): {e}")
+            # Don't fail — let the actual loading handle it
 
     def _ensure_model_available(self, model_path: str) -> str:
         """Ensure model is available locally, downloading from HuggingFace if needed.

@@ -221,14 +221,15 @@ class WorkerDaemon:
         for shard_id in list(self._shards.keys()):
             await self.stop_shard(shard_id)
 
+        # Unregister from Master FIRST (before stopping server/channel)
+        if self._stub:
+            await self._unregister()
+
         # Stop gRPC server
         if self._server:
             await self._server.stop(grace=2.0)
 
-        # Unregister from Master
-        if self._stub:
-            await self._unregister()
-
+        # Close channel
         if self._channel:
             await self._channel.close()
 
@@ -445,13 +446,21 @@ class WorkerDaemon:
         )
 
         try:
-            response = await self._stub.UnregisterWorker(request)
+            # Use timeout to prevent hanging if master is down
+            response = await asyncio.wait_for(
+                self._stub.UnregisterWorker(request),
+                timeout=5.0,
+            )
             if response.success:
                 logger.info(f"Unregistered from Master: {response.message}")
             else:
                 logger.warning(f"Unregister failed: {response.message}")
+        except asyncio.TimeoutError:
+            logger.error("Unregister timed out (master may be down)")
         except grpc.RpcError as e:
-            logger.warning(f"Unregister RPC error: {e}")
+            logger.error(f"Unregister RPC error: {e}")
+        except Exception as e:
+            logger.error(f"Unregister failed: {e}")
 
     async def _discover_workers(self) -> None:
         """Discover other workers and measure network latency."""

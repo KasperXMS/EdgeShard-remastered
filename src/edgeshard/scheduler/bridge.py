@@ -59,22 +59,25 @@ def worker_records_to_cluster_snapshot(
                 )
             )
 
-        # Populate per-device available memory from latest heartbeat metrics
-        # This is the actual free memory, not total — critical for scheduling
-        # when other processes (e.g. miners) are using GPU memory
-        for dev_info in devices:
+        # Populate per-device available memory.
+        # Priority: heartbeat metrics (live) > registration-time gpu_metrics (static)
+        # This is critical for scheduling — must use FREE memory, not total.
+        for i, dev_info in enumerate(devices):
+            pb_dev = rec.devices[i]
+
             if dev_info.device_type == "cuda":
-                # Extract GPU index from device_id (format: "cuda:0")
-                try:
-                    gpu_idx = int(dev_info.device_id.split(":")[1])
-                except (IndexError, ValueError):
-                    continue
+                # First try: heartbeat metrics (live, most accurate)
                 for dm in rec.device_metrics:
                     if dm.device_id == dev_info.device_id and dm.HasField("gpu_metrics"):
                         dev_info.available_memory_mb = dm.gpu_metrics.free_memory_mb
                         break
+
+                # Fallback: registration-time gpu_metrics (probed at worker start)
+                if dev_info.available_memory_mb == 0 and pb_dev.HasField("gpu_metrics"):
+                    dev_info.available_memory_mb = pb_dev.gpu_metrics.free_memory_mb
+
             elif dev_info.device_type in ("cpu", "jetson"):
-                # For CPU/Jetson, use system available memory
+                # For CPU/Jetson, use system available memory from heartbeat
                 dev_info.available_memory_mb = rec.available_memory_mb
 
         worker_state = WorkerState(
