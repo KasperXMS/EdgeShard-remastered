@@ -59,6 +59,25 @@ def export_cluster_snapshot(
                     "name": dev.name,
                     "total_memory_mb": dev.total_memory_mb,
                 }
+
+                # Per-device available memory from heartbeat metrics (live)
+                # or registration-time gpu_metrics (static fallback)
+                dev_available_mb = 0
+                # Try heartbeat device_metrics first (most recent)
+                for dm in worker.device_metrics:
+                    if dm.device_id == dev.device_id and dm.HasField("gpu_metrics"):
+                        dev_available_mb = dm.gpu_metrics.free_memory_mb
+                        break
+                # Fallback: registration-time gpu_metrics on DeviceInfo
+                if dev_available_mb == 0 and dev.HasField("gpu_metrics"):
+                    dev_available_mb = dev.gpu_metrics.free_memory_mb
+                # For CPU/Jetson, use worker-level available_memory_mb
+                if dev_available_mb == 0 and dev.device_type in ("cpu", "jetson"):
+                    dev_available_mb = worker.available_memory_mb
+
+                if dev_available_mb > 0:
+                    dev_entry["available_memory_mb"] = dev_available_mb
+
                 if dev.compute_capability:
                     dev_entry["compute_capability"] = dev.compute_capability
                 devices_data.append(dev_entry)
@@ -123,6 +142,20 @@ def export_cluster_snapshot(
         if total_jetsons:
             console.print(f"  Jetsons:    [yellow]{total_jetsons}[/yellow]")
         console.print(f"  Bandwidth:  [dim]{len(bandwidth_entries)} link(s) measured[/dim]")
+
+        # Show per-device free memory summary
+        console.print()
+        for w in workers_data:
+            for d in w.get("devices", []):
+                if d.get("device_type") == "cuda":
+                    free = d.get("available_memory_mb", 0)
+                    total = d.get("total_memory_mb", 0)
+                    if free > 0:
+                        console.print(
+                            f"  [dim]{w['worker_id']}[/dim] {d['name']} "
+                            f"[cyan]{d['device_id']}[/cyan]: "
+                            f"free={free}/{total} MB"
+                        )
         console.print()
         console.print(f"  Output:     [bold]{out}[/bold]")
         console.print()
