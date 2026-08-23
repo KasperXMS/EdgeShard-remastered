@@ -520,7 +520,7 @@ def optimize_latency(
     assignments_raw = _backtrace(choice, N, best_last, devices)
 
     # Calculate total communication time
-    total_comm = _calculate_total_comm(assignments_raw, comm_costs)
+    total_comm = _calculate_total_comm(assignments_raw, comm_costs, devices)
 
     # Estimate throughput (bottleneck stage)
     throughput = _estimate_throughput(assignments_raw, comp_cost, comm_costs)
@@ -606,16 +606,35 @@ def _backtrace(
 def _calculate_total_comm(
     assignments: list[tuple[int, int, DeviceSlot]],
     comm_costs: dict[tuple[int, int], float],
+    devices: list[DeviceSlot] | None = None,
 ) -> float:
     """Calculate total cross-device communication time."""
+    if devices is None:
+        # Fallback: count cross-device transfers with default 1ms each
+        total = 0.0
+        for i in range(1, len(assignments)):
+            prev_dev = assignments[i - 1][2]
+            curr_dev = assignments[i][2]
+            if prev_dev != curr_dev:
+                total += 1.0
+        return total
+
+    # Build device → index mapping
+    dev_to_idx: dict[tuple[str, str], int] = {}
+    for idx, d in enumerate(devices):
+        dev_to_idx[(d.worker_id, d.device_id)] = idx
+
     total = 0.0
     for i in range(1, len(assignments)):
-        prev_dev = assignments[i - 1][2]
-        curr_dev = assignments[i][2]
-        if prev_dev != curr_dev:
-            # Find device indices in original list (need to search)
-            # Use a default estimate since we don't have indices here
-            total += 1.0  # Placeholder — actual cost computed by caller
+        prev_slot = assignments[i - 1][2]
+        curr_slot = assignments[i][2]
+        if prev_slot != curr_slot:
+            prev_idx = dev_to_idx.get((prev_slot.worker_id, prev_slot.device_id))
+            curr_idx = dev_to_idx.get((curr_slot.worker_id, curr_slot.device_id))
+            if prev_idx is not None and curr_idx is not None:
+                total += comm_costs.get((prev_idx, curr_idx), 1.0)
+            else:
+                total += 1.0  # Fallback
     return total
 
 
@@ -631,23 +650,11 @@ def _estimate_throughput(
     if not assignments:
         return 0.0
 
-    # Calculate time for each stage
+    # Calculate time for each stage using device's own layer_forward_ms
     max_stage_time = 0.0
     for layer_start, layer_end, device in assignments:
         n_layers = layer_end - layer_start
-        # Find device index
-        dev_idx = -1
-        for idx, d in enumerate(
-            [DeviceSlot("", "", "", "", 0, c) for c in comp_costs]
-        ):
-            if d.layer_forward_ms == device.layer_forward_ms:
-                dev_idx = idx
-                break
-
-        if dev_idx >= 0:
-            stage_time = comp_costs[dev_idx] * n_layers
-        else:
-            stage_time = device.layer_forward_ms * n_layers
+        stage_time = device.layer_forward_ms * n_layers
         max_stage_time = max(max_stage_time, stage_time)
 
     if max_stage_time > 0:
@@ -775,10 +782,7 @@ def optimize_throughput(
     # Backtrace
     assignments = _backtrace_throughput(choice, N, best_last, devices)
 
-    total_comm = 0.0
-    for i in range(1, len(assignments)):
-        if assignments[i][2].worker_id != assignments[i - 1][2].worker_id:
-            total_comm += 5.0  # Approximate
+    total_comm = _calculate_total_comm(assignments, comm_costs, devices)
 
     throughput = 1000.0 / best_cost if best_cost > 0 else 0.0
 
@@ -822,8 +826,15 @@ def _backtrace_throughput(
 
 
 def source_idx_from_choice(choice: list[list[tuple[int, int]]]) -> int:
-    """Find source device index from choice table."""
-    return 0  # Default
+    """Find source device index from the base case in the choice table.
+
+    The base case is choice[1][source_idx] = (0, -1).
+    """
+    M = len(choice[0]) if choice else 0
+    for j in range(M):
+        if choice[1][j] == (0, -1):
+            return j
+    return 0  # Fallback
 
 
 def _merge_consecutive_shards(
