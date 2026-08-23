@@ -177,6 +177,32 @@ class Qwen2Adapter(ModelAdapter):
 
         logger.debug(f"Building model with config dtype={self._dtype}")
 
+        # Set global default dtype to ensure all HF-created tensors use target dtype
+        # Some HF modules don't respect config.torch_dtype during __init__
+        old_default_dtype = torch.get_default_dtype()
+        torch.set_default_dtype(self._dtype)
+
+        try:
+            self._build_model_inner(config, weights, layer_start, layer_end, num_layers)
+        finally:
+            # Restore original default dtype
+            torch.set_default_dtype(old_default_dtype)
+
+    def _build_model_inner(
+        self,
+        config,
+        weights: dict[str, torch.Tensor],
+        layer_start: int,
+        layer_end: int,
+        num_layers: int,
+    ) -> None:
+        """Inner model building logic, runs with correct default dtype."""
+        from transformers.models.qwen2.modeling_qwen2 import (
+            Qwen2DecoderLayer,
+            Qwen2RMSNorm,
+        )
+        import torch.nn as nn
+
         # Embedding layer (only on first shard)
         if layer_start == 0 and "model.embed_tokens.weight" in weights:
             vocab_size = config.vocab_size
