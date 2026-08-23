@@ -18,6 +18,7 @@ import subprocess
 import sys
 import time
 import uuid
+from pathlib import Path
 from concurrent import futures
 from typing import Any
 
@@ -53,10 +54,24 @@ class WorkerServicer(edgeshard_pb2_grpc.WorkerServiceServicer):
         context: grpc.ServicerContext,
     ) -> edgeshard_pb2.StartShardResponse:
         """Handle StartShard RPC from Master."""
+        # Auto-detect first/last if not explicitly set by older Master code
+        is_first = request.is_first_shard
+        is_last = request.is_last_shard
+        if not is_first and not is_last:
+            # Fallback: if layer range starts at 0 → first shard
+            # We can't know "last" without model info, but first is safe
+            if request.layer_start == 0:
+                is_first = True
+            logger.info(
+                f"Master didn't set is_first/is_last flags; "
+                f"inferred is_first={is_first}, is_last={is_last}"
+            )
+
         logger.info(
             f"StartShard request: {request.shard_id} "
             f"(layers {request.layer_start}:{request.layer_end}, "
-            f"device {request.device})"
+            f"device {request.device}, "
+            f"first={is_first}, last={is_last})"
         )
 
         try:
@@ -71,8 +86,8 @@ class WorkerServicer(edgeshard_pb2_grpc.WorkerServiceServicer):
                 device=request.device,
                 data_host=request.data_host or "0.0.0.0",
                 data_port=request.data_port or 50100,
-                is_first_shard=request.is_first_shard,
-                is_last_shard=request.is_last_shard,
+                is_first_shard=is_first,
+                is_last_shard=is_last,
                 master_address=request.master_address,
             )
 
@@ -291,11 +306,19 @@ class WorkerDaemon:
 
         logger.info(f"Spawning shard: {' '.join(cmd)}")
 
-        # Start subprocess
+        # Write shard output to a log file for debugging
+        # (Rich traceback formatting is too verbose for in-memory capture)
+        log_dir = Path("logs")
+        log_dir.mkdir(exist_ok=True)
+        log_file = log_dir / f"{shard_id}.log"
+        log_fh = open(log_file, "w")
+        logger.info(f"Shard log: {log_file.resolve()}")
+
+        # Start subprocess — stderr goes to log file for full traceback
         proc = subprocess.Popen(
             cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stdout=log_fh,
+            stderr=log_fh,
         )
 
         self._shard_processes[shard_id] = proc
@@ -313,17 +336,12 @@ class WorkerDaemon:
 
         # Poll for shard readiness — wait up to 60 seconds for model loading/download
         ready = False
-        last_stderr = b""
         for _ in range(60):
             await asyncio.sleep(1.0)
 
             # Check if process died
             if proc.poll() is not None:
-                # Process exited — collect stderr
-                try:
-                    _, last_stderr = proc.communicate(timeout=2)
-                except Exception:
-                    last_stderr = b""
+                # Process exited
                 break
 
             # Try to connect to the data port to verify shard is ready
@@ -344,7 +362,18 @@ class WorkerDaemon:
             logger.info(f"Shard {shard_id} started and ready (PID: {proc.pid})")
         else:
             self._shards[shard_id]["status"] = "failed"
-            error_msg = last_stderr.decode(errors="replace")[:1000] if last_stderr else "Shard did not become ready within 60s"
+            # Read the last part of the log file for error summary
+            error_msg = f"Shard did not become ready within 60s. Check log: {log_file.resolve()}"
+            try:
+                log_fh.close()
+                with open(log_file, errors="replace") as f:
+                    lines = f.readlines()
+                    # Get last 30 lines for error context
+                    tail = "".join(lines[-30:])
+                    if tail:
+                        error_msg = f"{error_msg}\n--- Last lines from {log_file.name} ---\n{tail}"
+            except Exception:
+                pass
             logger.error(f"Shard {shard_id} failed to start: {error_msg}")
             raise RuntimeError(f"Shard failed to start: {error_msg}")
 
