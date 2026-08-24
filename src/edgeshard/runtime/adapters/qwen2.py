@@ -416,8 +416,8 @@ class Qwen2Adapter(ModelAdapter):
 
         for i, layer in enumerate(self._layers):
             try:
-                # Qwen2DecoderLayer.forward() returns a single tensor, not a tuple
-                hidden_states = layer(
+                # Qwen2DecoderLayer.forward() may return tensor or tuple depending on transformers version
+                layer_output = layer(
                     hidden_states,
                     attention_mask=attention_mask,
                     position_ids=position_ids,
@@ -426,6 +426,11 @@ class Qwen2Adapter(ModelAdapter):
                     position_embeddings=position_embeddings,
                     cache_position=cache_position,
                 )
+                # Handle both single tensor and tuple return formats
+                if isinstance(layer_output, tuple):
+                    hidden_states = layer_output[0]
+                else:
+                    hidden_states = layer_output
             except Exception as e:
                 logger.error(f"Layer {i} forward failed: {e}")
                 raise
